@@ -110,21 +110,23 @@ Deep grounding enables wide generalization.
 
 **Insight from conversation:** This maps to left/right hemisphere split.
 
-### LINEAR TETRAHEDRON (Right/Holistic/Topological)
-- No ReLU
+### LINEAR TETRAHEDRON (Left/Logical/Deterministic)
+- **No ReLU**
+- Works for arithmetic (deterministic, rule-based, exact)
 - Learns smooth manifold structure
 - Extrapolates perfectly on deterministic tasks
-- Continuous, flow-based
-- "Sees" the whole pattern
-- **Emotional, nondeterministic (in the sense of flowing/intuitive)**
+- Precise, continuous mathematics
+- **Logical operations, mathematical structure**
 
-### NONLINEAR TETRAHEDRON (Left/Analytical/Statistical)
-- ReLU activated
-- Learns discrete boundaries/categories
-- Handles uncertainty and variation
-- Discontinuous, symbol-based
-- "Analyzes" parts
-- **Logical, deterministic (in the sense of rule-based)**
+### NONLINEAR TETRAHEDRON (Right/Emotional/Nondeterministic)
+- **ReLU activated**
+- Needed for perception/images (fuzzy, variable, statistical)
+- Handles uncertainty and discontinuities
+- Adaptive to variation
+- Pattern recognition in noisy data
+- **Emotional, intuitive, holistic processing**
+
+**Key insight:** Arithmetic is deterministic/logical → uses linear (left). Images are fuzzy/nondeterministic → use nonlinear (right).
 
 ### The Coupling Question
 
