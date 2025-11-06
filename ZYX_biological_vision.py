@@ -26,7 +26,7 @@ from collections import deque
 
 # Import base components
 from Z_interface_coupling import DualTetrahedralNetwork
-from CONTINUOUS_LEARNING_SYSTEM import ContinuousLearner
+from ZYZ_continuous_learning import ContinuousLearner
 
 
 # ============================================================================
