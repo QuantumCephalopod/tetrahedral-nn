@@ -20,123 +20,13 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-from typing import Tuple, List, Iterator, Optional, Dict
+from typing import Tuple, List, Iterator, Optional
 import cv2
 from collections import deque
 
 # Import base components
 from Z_interface_coupling import DualTetrahedralNetwork
-
-
-# ============================================================================
-# CONTINUOUS LEARNER BASE CLASS (embedded for Colab self-containment)
-# ============================================================================
-
-class ContinuousLearner:
-    """
-    Base class for continuous learning from frame streams.
-
-    Handles:
-    - Frame buffering (sliding window)
-    - Learning from sequences
-    - Checkpointing
-    - Learning rate scheduling
-    """
-    def __init__(
-        self,
-        model: nn.Module,
-        optimizer: torch.optim.Optimizer,
-        window_size: int = 3,
-        device: str = 'cpu'
-    ):
-        self.model = model.to(device)
-        self.optimizer = optimizer
-        self.window_size = window_size
-        self.device = device
-
-        # Frame buffer (sliding window)
-        self.frame_buffer = deque(maxlen=window_size + 1)
-
-        # Learning statistics
-        self.total_updates = 0
-        self.current_loss = 0.0
-        self.loss_history = []
-
-        # Learning rate scheduling
-        self.initial_lr = optimizer.param_groups[0]['lr']
-
-    def observe_frame(self, frame: np.ndarray) -> Optional[float]:
-        """Observe a single frame and learn if possible."""
-        self.frame_buffer.append(frame)
-
-        # Need full window + target to learn
-        if len(self.frame_buffer) < self.window_size + 1:
-            return None
-
-        # Create input window and target
-        input_frames = list(self.frame_buffer)[:self.window_size]
-        target_frame = self.frame_buffer[-1]
-
-        # Flatten and concatenate
-        input_flat = np.concatenate([f.flatten() for f in input_frames])
-        target_flat = target_frame.flatten()
-
-        # Convert to tensors
-        input_tensor = torch.tensor(input_flat, dtype=torch.float32).unsqueeze(0).to(self.device)
-        target_tensor = torch.tensor(target_flat, dtype=torch.float32).unsqueeze(0).to(self.device)
-
-        # Learn from this observation
-        return self._learn_step(input_tensor, target_tensor)
-
-    def _learn_step(self, input_tensor: torch.Tensor, target_tensor: torch.Tensor) -> float:
-        """Single learning step."""
-        self.model.train()
-
-        # Forward
-        output = self.model(input_tensor)
-        loss = nn.MSELoss()(output, target_tensor)
-
-        # Backward
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
-
-        # Update statistics
-        self.total_updates += 1
-        self.current_loss = loss.item()
-        self.loss_history.append(self.current_loss)
-
-        # Adaptive learning rate
-        if self.total_updates % 1000 == 0:
-            self._adjust_learning_rate()
-
-        return self.current_loss
-
-    def _adjust_learning_rate(self):
-        """Adjust learning rate based on progress."""
-        for param_group in self.optimizer.param_groups:
-            param_group['lr'] *= 0.95
-
-    def save_checkpoint(self, path: str):
-        """Save current state."""
-        checkpoint = {
-            'model_state': self.model.state_dict(),
-            'optimizer_state': self.optimizer.state_dict(),
-            'total_updates': self.total_updates,
-            'loss_history': self.loss_history
-        }
-        torch.save(checkpoint, path)
-        print(f"✓ Checkpoint saved: {path}")
-
-    def load_checkpoint(self, path: str):
-        """Load previous state."""
-        checkpoint = torch.load(path)
-        self.model.load_state_dict(checkpoint['model_state'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state'])
-        self.total_updates = checkpoint['total_updates']
-        self.loss_history = checkpoint['loss_history']
-        print(f"✓ Checkpoint loaded: {path}")
-        print(f"   Resuming from update {self.total_updates}")
+from ZYZ_continuous_learning import ContinuousLearner
 
 
 # ============================================================================
