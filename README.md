@@ -80,67 +80,29 @@ Adapters bridge dimensions to handle specific domains:
 - **`ZX_rotation_adapter.py`** - Rotation learning interface (Z ∩ X plane)
 - **`ZY_temporal_adapter.py`** - Temporal prediction interface (Z ∩ Y plane)
 
-### 🎯 Applications & Systems
-Complete implementations and validation:
+### 🎯 Utilities
+- **`tetrahedral_trainer.py`** - Universal training system
+- **`rotations.png`** - Visualization of rotation learning
 
-- **`CONTINUOUS_LEARNING_SYSTEM.py`** - Continuous video learning (no epochs, just observation)
-- **`GENERALIZATION_TEST.py`** - Arithmetic generalization validation
-- **`BASELINE_TEST.py`** - Single vs dual tetrahedron comparison
-- **`INFERENCE_SHOWCASE.py`** - Deployment and inference examples
-- **`COLAB_INFERENCE_CELL.py`** - Single-cell Colab runner
+### 📚 Documentation
+- **`COLAB_CELLS.md`** - Copy-paste cells for Colab (START HERE!)
+- **`EXPLORATIONS.md`** - Philosophy and conceptual foundations
+- **`README.md`** - This file
 
-### 📚 Legacy Files (from original fork)
-Original single-tetrahedron implementation:
+## Quick Start (Google Colab)
 
-- **`tetrahedral_core.py`** - Original monolithic architecture
-- **`arithmetic_adapter.py`** - Simple arithmetic adapter
-- **`tetrahedral_trainer.py`** - Universal training system (still used!)
-- **`tetrahedral_tests.py`** - Original test suite
-- **`train_example.py`** - Basic training example
+**→ See `COLAB_CELLS.md` for copy-paste cells!**
 
-## Usage
+Just copy each cell into Google Colab in order:
+1. Clone repo
+2. Import libraries
+3. Create data
+4. Create model (dual/linear/nonlinear)
+5. Train
+6. Test generalization
+7. Plot results
 
-### Quick Start (Google Colab)
-
-See **`COLAB_QUICKSTART.md`** for ready-to-use Colab examples!
-
-**TL;DR:** Copy any file into a Colab cell and run. Files are self-contained.
-
-### Dual-Tetrahedral Network Example
-
-```python
-import torch
-import torch.optim as optim
-from Z_interface_coupling import DualTetrahedralNetwork
-
-# Create dual network
-model = DualTetrahedralNetwork(
-    input_dim=2,
-    output_dim=1,
-    latent_dim=64,
-    coupling_strength=0.5,
-    output_mode="weighted"
-)
-
-# Use with any adapter (ZW, ZX, ZY)
-from ZW_arithmetic_adapter import ArithmeticAdapter
-adapter = ArithmeticAdapter(n_inputs=2)
-
-# Training works the same as single tetrahedron
-# See GENERALIZATION_TEST.py for complete examples
-```
-
-### Legacy Single-Tetrahedron Example
-
-```python
-from tetrahedral_core import TetrahedralCore
-from arithmetic_adapter import ArithmeticAdapter
-from tetrahedral_trainer import TetrahedralTrainer
-
-# Original architecture still works!
-model = TetrahedralCore(input_dim=2, output_dim=1, latent_dim=64)
-# ... (see train_example.py for full code)
-```
+Takes ~5 minutes, shows 1000x arithmetic generalization!
 
 ## Technical Details
 
