@@ -21,8 +21,12 @@ import numpy as np
 import random
 from pathlib import Path
 import time
+import sys
 
-from COUNCIL_OF_ADVERSARIES import (
+# Add repo root to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from Z_COUPLING.COUNCIL_OF_ADVERSARIES import (
     CouncilOfAdversariesNetwork,
     ExternalDiscriminator,
     train_council_step,

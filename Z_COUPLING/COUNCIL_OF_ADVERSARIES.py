@@ -22,8 +22,9 @@ from pathlib import Path
 
 # Import existing architecture
 import sys
-sys.path.append('.')
-from W_geometry import (
+sys.path.insert(0, str(Path(__file__).parent.parent))  # Add repo root to path
+
+from W_FOUNDATION.W_geometry import (
     EDGE_INDICES,
     FACE_INDICES,
     EdgeAttention,
