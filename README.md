@@ -72,9 +72,8 @@ tetrahedral-nn/
 ├── Y_NONLINEAR/           # Vertex 2: Nonlinear hemisphere
 │   └── Y_nonlinear_tetrahedron.py # Boundaries, perception
 │
-├── Z_COUPLING/            # Vertex 3: Integration & council
-│   ├── Z_interface_coupling.py    # Face-to-face coupling
-│   └── COUNCIL_OF_ADVERSARIES.py  # GAN-based field generation
+├── Z_COUPLING/            # Vertex 3: Integration
+│   └── Z_interface_coupling.py    # Face-to-face coupling
 │
 ├── ADAPTERS/              # Edges: Subdivision planes
 │   ├── ZW_arithmetic_adapter.py
@@ -88,18 +87,15 @@ tetrahedral-nn/
 │   ├── GENERALIZATION_TEST.py
 │   ├── BASELINE_TEST.py
 │   ├── IMAGE_TRANSFORM.py
-│   ├── CONTINUOUS_LEARNING_SYSTEM.py
-│   └── COUNCIL_TRAINING.py
+│   └── CONTINUOUS_LEARNING_SYSTEM.py
 │
 ├── DEMOS/                 # Quick examples
 │   ├── INFERENCE_SHOWCASE.py
-│   ├── COLAB_INFERENCE_CELL.py
-│   └── COUNCIL_DEMO.py
+│   └── COLAB_INFERENCE_CELL.py
 │
 ├── DOCS/                  # All documentation
 │   ├── EXPLORATIONS.md
 │   ├── EXPLORATIONS_IMAGE_TRANSFORM.md
-│   ├── COUNCIL_README.md
 │   └── COLAB_QUICKSTART.md
 │
 └── assets/                # Visualizations
@@ -138,23 +134,6 @@ model = DualTetrahedralNetwork(
 
 adapter = ArithmeticAdapter(n_inputs=2)
 # See EXPERIMENTS/GENERALIZATION_TEST.py for complete examples
-```
-
-### Council of Adversaries (GAN) Example
-
-```python
-from Z_COUPLING.COUNCIL_OF_ADVERSARIES import CouncilOfAdversariesNetwork
-
-# Field-based generation (not single output!)
-model = CouncilOfAdversariesNetwork(
-    input_dim=128*128*3,
-    output_dim=128*128*3,
-    latent_dim=128,
-    num_candidates=4  # Each network generates 4 candidates
-)
-
-# See EXPERIMENTS/COUNCIL_TRAINING.py for full training
-# See DEMOS/COUNCIL_DEMO.py for quick test
 ```
 
 ## Technical Details
@@ -225,18 +204,15 @@ The tetrahedral structure itself is established in mesh processing; the novel co
 - [x] Temporal prediction learning
 - [x] Continuous learning system (video streams)
 - [x] Inter-face coupling mechanism
-- [x] **Council of Adversaries** - GAN-based field generation architecture
 
 ### 🚧 In Progress
-- [ ] Training Council architecture on fabric→skin transformation
-- [ ] Comparing MSE vs GAN loss on manifold-based tasks
+- [ ] Addressing MSE "mush" limitation in image transformation
 - [ ] Fractal subdivision (W→WW/WX/WY/WZ, etc.)
 - [ ] Multi-modal learning (vision + language)
 
 ### 📚 Documentation
 - **`DOCS/EXPLORATIONS.md`** - Philosophical foundations
 - **`DOCS/EXPLORATIONS_IMAGE_TRANSFORM.md`** - Image transformation experiments
-- **`DOCS/COUNCIL_README.md`** - Council of Adversaries architecture guide
 
 ---
 
