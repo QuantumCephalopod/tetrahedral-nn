@@ -23,7 +23,16 @@ from pathlib import Path
 # Import existing architecture
 import sys
 sys.path.append('.')
-from W_geometry import EdgeAttention, FaceAttention, InterFaceAttention
+from W_geometry import (
+    EDGE_INDICES,
+    FACE_INDICES,
+    EdgeAttention,
+    FaceAttention,
+    InterFaceAttention,
+    compute_all_edges,
+    compute_all_faces,
+    aggregate_to_vertices
+)
 
 # ============================================================================
 # CORE COMPONENTS
@@ -127,27 +136,42 @@ class LinearTetrahedron(nn.Module):
         self.latent_dim = latent_dim
 
         # Input -> 4 vertices
-        self.input_projection = nn.Linear(input_dim, latent_dim * 4)
+        self.embed = nn.Linear(input_dim, latent_dim * 4)
 
-        # Attention layers
-        self.edge_attention = EdgeAttention(latent_dim)
-        self.face_attention = FaceAttention(latent_dim)
-        self.interface_attention = InterFaceAttention(latent_dim)
+        # 6 edge modules
+        self.edge_modules = nn.ModuleList([
+            EdgeAttention(latent_dim) for _ in range(6)
+        ])
+
+        # 4 face modules
+        self.face_modules = nn.ModuleList([
+            FaceAttention(latent_dim) for _ in range(4)
+        ])
 
     def forward(self, x, return_faces=False):
-        vertices = self.input_projection(x).reshape(-1, 4, self.latent_dim)
-        vertices = self.edge_attention(vertices)
-        vertices, faces = self.face_attention(vertices, return_faces=True)
-        vertices = self.interface_attention(vertices, faces)
+        batch_size = x.size(0)
+
+        # Embed to vertices
+        vertices = self.embed(x).view(batch_size, 4, self.latent_dim)
+
+        # Process edges
+        edge_outputs = compute_all_edges(vertices, self.edge_modules)
+        vertices = aggregate_to_vertices(edge_outputs, vertices)
+
+        # Process faces
+        face_outputs = compute_all_faces(vertices, self.face_modules)
+        vertices = aggregate_to_vertices(face_outputs, vertices)
 
         if return_faces:
+            # Return faces as tensor [batch, 4, latent_dim]
+            faces = torch.stack(face_outputs, dim=1)
             return vertices, faces
         return vertices
 
     def update_from_faces(self, vertices, face_updates):
         """Update vertices based on face coupling signals"""
         bs = vertices.size(0)
-        # Simple averaging for now
+        # Average face updates
         update = torch.stack(face_updates, dim=1).mean(dim=1)
         update = update.reshape(bs, 4, self.latent_dim)
         return vertices + update * 0.1
@@ -161,24 +185,39 @@ class NonlinearTetrahedron(nn.Module):
         self.latent_dim = latent_dim
 
         # Input -> 4 vertices (with ReLU)
-        self.input_projection = nn.Sequential(
+        self.embed = nn.Sequential(
             nn.Linear(input_dim, latent_dim * 8),
             nn.ReLU(),
             nn.Linear(latent_dim * 8, latent_dim * 4)
         )
 
-        # Attention layers
-        self.edge_attention = EdgeAttention(latent_dim)
-        self.face_attention = FaceAttention(latent_dim)
-        self.interface_attention = InterFaceAttention(latent_dim)
+        # 6 edge modules
+        self.edge_modules = nn.ModuleList([
+            EdgeAttention(latent_dim) for _ in range(6)
+        ])
+
+        # 4 face modules
+        self.face_modules = nn.ModuleList([
+            FaceAttention(latent_dim) for _ in range(4)
+        ])
 
     def forward(self, x, return_faces=False):
-        vertices = self.input_projection(x).reshape(-1, 4, self.latent_dim)
-        vertices = self.edge_attention(vertices)
-        vertices, faces = self.face_attention(vertices, return_faces=True)
-        vertices = self.interface_attention(vertices, faces)
+        batch_size = x.size(0)
+
+        # Embed to vertices (with ReLU processing)
+        vertices = self.embed(x).view(batch_size, 4, self.latent_dim)
+
+        # Process edges
+        edge_outputs = compute_all_edges(vertices, self.edge_modules)
+        vertices = aggregate_to_vertices(edge_outputs, vertices)
+
+        # Process faces
+        face_outputs = compute_all_faces(vertices, self.face_modules)
+        vertices = aggregate_to_vertices(face_outputs, vertices)
 
         if return_faces:
+            # Return faces as tensor [batch, 4, latent_dim]
+            faces = torch.stack(face_outputs, dim=1)
             return vertices, faces
         return vertices
 
