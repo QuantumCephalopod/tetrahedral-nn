@@ -56,62 +56,76 @@ The tetrahedral topology provides geometric structure for self-organization with
 - **Finding:** Architecture works bidirectionally
 - **Implications:** Symmetric processing capabilities
 
-## Repository Structure (Dimensional Organization)
+## Repository Structure
 
-### 📐 Core Dimensions (W, X, Y, Z)
-The architecture is organized into 4 fundamental dimensions:
+The repository mirrors the tetrahedral topology - **4 vertices as folders**:
 
-- **`W_geometry.py`** - **Foundation Dimension**
-  Pure tetrahedral topology: vertices, edges, faces, attention primitives
+```
+tetrahedral-nn/
+│
+├── W_FOUNDATION/          # Vertex 0: Pure geometry
+│   └── W_geometry.py      # Topology primitives (edges, faces, attention)
+│
+├── X_LINEAR/              # Vertex 1: Linear hemisphere
+│   └── X_linear_tetrahedron.py    # Smooth manifolds, deterministic
+│
+├── Y_NONLINEAR/           # Vertex 2: Nonlinear hemisphere
+│   └── Y_nonlinear_tetrahedron.py # Boundaries, perception
+│
+├── Z_COUPLING/            # Vertex 3: Integration & council
+│   ├── Z_interface_coupling.py    # Face-to-face coupling
+│   └── COUNCIL_OF_ADVERSARIES.py  # GAN-based field generation
+│
+├── ADAPTERS/              # Edges: Subdivision planes
+│   ├── ZW_arithmetic_adapter.py
+│   ├── ZX_rotation_adapter.py
+│   ├── ZY_temporal_adapter.py
+│   ├── ZYW_scanning_eye.py
+│   ├── ZYX_biological_vision.py
+│   └── ZYZ_continuous_learning.py
+│
+├── EXPERIMENTS/           # Applications
+│   ├── GENERALIZATION_TEST.py
+│   ├── BASELINE_TEST.py
+│   ├── IMAGE_TRANSFORM.py
+│   ├── CONTINUOUS_LEARNING_SYSTEM.py
+│   └── COUNCIL_TRAINING.py
+│
+├── DEMOS/                 # Quick examples
+│   ├── INFERENCE_SHOWCASE.py
+│   ├── COLAB_INFERENCE_CELL.py
+│   └── COUNCIL_DEMO.py
+│
+├── DOCS/                  # All documentation
+│   ├── EXPLORATIONS.md
+│   ├── EXPLORATIONS_IMAGE_TRANSFORM.md
+│   ├── COUNCIL_README.md
+│   └── COLAB_QUICKSTART.md
+│
+└── assets/                # Visualizations
+    ├── rotations.png
+    └── transform.PNG
+```
 
-- **`X_linear_tetrahedron.py`** - **Linear Dimension (Left Hemisphere)**
-  No ReLU activation. Learns smooth manifolds, perfect for arithmetic and deterministic tasks
-
-- **`Y_nonlinear_tetrahedron.py`** - **Nonlinear Dimension (Right Hemisphere)**
-  With ReLU activation. Handles boundaries, perception, statistical patterns
-
-- **`Z_interface_coupling.py`** - **Integration Dimension**
-  Dual-tetrahedral network with face-to-face coupling between X and Y
-
-### 🔗 Adapter Planes (Inter-Dimensional Interfaces)
-Adapters bridge dimensions to handle specific domains:
-
-- **`ZW_arithmetic_adapter.py`** - Arithmetic interface (Z ∩ W plane)
-- **`ZX_rotation_adapter.py`** - Rotation learning interface (Z ∩ X plane)
-- **`ZY_temporal_adapter.py`** - Temporal prediction interface (Z ∩ Y plane)
-
-### 🎯 Applications & Systems
-Complete implementations and validation:
-
-- **`CONTINUOUS_LEARNING_SYSTEM.py`** - Continuous video learning (no epochs, just observation)
-- **`GENERALIZATION_TEST.py`** - Arithmetic generalization validation
-- **`BASELINE_TEST.py`** - Single vs dual tetrahedron comparison
-- **`INFERENCE_SHOWCASE.py`** - Deployment and inference examples
-- **`COLAB_INFERENCE_CELL.py`** - Single-cell Colab runner
-
-### 📚 Legacy Files (from original fork)
-Original single-tetrahedron implementation:
-
-- **`tetrahedral_core.py`** - Original monolithic architecture
-- **`arithmetic_adapter.py`** - Simple arithmetic adapter
-- **`tetrahedral_trainer.py`** - Universal training system (still used!)
-- **`tetrahedral_tests.py`** - Original test suite
-- **`train_example.py`** - Basic training example
+**Philosophy:** Structure = Architecture. The file system itself is tetrahedral.
 
 ## Usage
 
 ### Quick Start (Google Colab)
 
-See **`COLAB_QUICKSTART.md`** for ready-to-use Colab examples!
+See **`DOCS/COLAB_QUICKSTART.md`** for ready-to-use Colab examples!
 
-**TL;DR:** Copy any file into a Colab cell and run. Files are self-contained.
+**TL;DR:** Files are self-contained. Just add repo root to path.
 
 ### Dual-Tetrahedral Network Example
 
 ```python
 import torch
-import torch.optim as optim
-from Z_interface_coupling import DualTetrahedralNetwork
+import sys
+sys.path.insert(0, '/content/tetrahedral-nn')  # Or your repo path
+
+from Z_COUPLING.Z_interface_coupling import DualTetrahedralNetwork
+from ADAPTERS.ZW_arithmetic_adapter import ArithmeticAdapter
 
 # Create dual network
 model = DualTetrahedralNetwork(
@@ -122,24 +136,25 @@ model = DualTetrahedralNetwork(
     output_mode="weighted"
 )
 
-# Use with any adapter (ZW, ZX, ZY)
-from ZW_arithmetic_adapter import ArithmeticAdapter
 adapter = ArithmeticAdapter(n_inputs=2)
-
-# Training works the same as single tetrahedron
-# See GENERALIZATION_TEST.py for complete examples
+# See EXPERIMENTS/GENERALIZATION_TEST.py for complete examples
 ```
 
-### Legacy Single-Tetrahedron Example
+### Council of Adversaries (GAN) Example
 
 ```python
-from tetrahedral_core import TetrahedralCore
-from arithmetic_adapter import ArithmeticAdapter
-from tetrahedral_trainer import TetrahedralTrainer
+from Z_COUPLING.COUNCIL_OF_ADVERSARIES import CouncilOfAdversariesNetwork
 
-# Original architecture still works!
-model = TetrahedralCore(input_dim=2, output_dim=1, latent_dim=64)
-# ... (see train_example.py for full code)
+# Field-based generation (not single output!)
+model = CouncilOfAdversariesNetwork(
+    input_dim=128*128*3,
+    output_dim=128*128*3,
+    latent_dim=128,
+    num_candidates=4  # Each network generates 4 candidates
+)
+
+# See EXPERIMENTS/COUNCIL_TRAINING.py for full training
+# See DEMOS/COUNCIL_DEMO.py for quick test
 ```
 
 ## Technical Details
@@ -210,14 +225,18 @@ The tetrahedral structure itself is established in mesh processing; the novel co
 - [x] Temporal prediction learning
 - [x] Continuous learning system (video streams)
 - [x] Inter-face coupling mechanism
+- [x] **Council of Adversaries** - GAN-based field generation architecture
 
 ### 🚧 In Progress
-- [ ] Fractal subdivision (W→WW/WX/WY/WZ, X→XX/XY/XZ/XW, etc.)
+- [ ] Training Council architecture on fabric→skin transformation
+- [ ] Comparing MSE vs GAN loss on manifold-based tasks
+- [ ] Fractal subdivision (W→WW/WX/WY/WZ, etc.)
 - [ ] Multi-modal learning (vision + language)
-- [ ] Real-world deployment testing
 
 ### 📚 Documentation
-See **`EXPLORATIONS.md`** for philosophical foundations, conceptual insights, and the vision behind the architecture.
+- **`DOCS/EXPLORATIONS.md`** - Philosophical foundations
+- **`DOCS/EXPLORATIONS_IMAGE_TRANSFORM.md`** - Image transformation experiments
+- **`DOCS/COUNCIL_README.md`** - Council of Adversaries architecture guide
 
 ---
 

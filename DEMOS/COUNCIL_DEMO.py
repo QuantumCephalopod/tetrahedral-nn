@@ -7,7 +7,13 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
-from COUNCIL_OF_ADVERSARIES import CouncilOfAdversariesNetwork
+import sys
+from pathlib import Path
+
+# Add repo root to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from Z_COUPLING.COUNCIL_OF_ADVERSARIES import CouncilOfAdversariesNetwork
 
 def demo_council():
     print("="*70)
