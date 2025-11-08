@@ -588,6 +588,96 @@ But transformation reality is:
 
 ---
 
+### Finding 8: Structured vs Random Batching - Learning Modes
+
+**The Core Insight:**
+
+Batch composition is an **inductive bias** that shapes what the network learns. How samples are grouped in each gradient update fundamentally changes the learning signal.
+
+**Random Batching (shuffle=True, no structure):**
+```
+Batch 1: [Pair3_rot90_RGB, Pair1_flip_edges, Pair5_orig_gray, Pair2_rot180_dither]
+Batch 2: [Pair4_flip_gray, Pair3_orig_edges, Pair1_rot270_RGB, ...]
+```
+
+What the gradient says: "Find what's generally true across unrelated examples"
+- Network sees diverse samples
+- Learns broad patterns
+- Like real-world experience: random encounters
+- Risk: Might average across fundamentally different patterns
+
+**Structured Batching (same base pair, all representations):**
+```
+Batch 1: [Pair3_rot90_RGB, Pair3_rot90_edges, Pair3_rot90_gray, Pair3_rot90_dither]
+Batch 2: [Pair5_orig_RGB, Pair5_orig_edges, Pair5_orig_gray, Pair5_orig_dither]
+```
+
+What the gradient says: "Find what's INVARIANT across these 4 views of the SAME transformation"
+- Network sees same transformation through different modalities
+- Forces learning structure independent of representation
+- Like curriculum learning: structured instruction
+- Risk: Might over-constrain, forcing impossible consistency
+
+**Experimental Results:**
+
+Pure Structured (ratio=1.0):
+- Consistency loss INCREASED over training (0.12 → 0.19)
+- Network struggled: "These 4 inputs are fundamentally different (RGB vs edges)"
+- Forcing them to produce identical outputs is too constraining
+- BUT: Learned invariants faster initially
+
+Hybrid 70/30 (ratio=0.7):
+- Best of both worlds
+- Breakthrough at epoch 130 (train loss: 0.8 → 0.02)
+- Test loss improved to ~0.16
+- Network learned: Structure from structured batches, flexibility from random batches
+
+**The Pedagogical Insight:**
+
+This mirrors human learning theory:
+
+**Blocked Practice (Structured):**
+- AAAA BBBB CCCC
+- Practice same skill repeatedly
+- Fast initial learning
+- Builds specific competence
+- Example: "Here's a triangle from 4 angles"
+
+**Interleaved Practice (Random):**
+- ABCABCABC
+- Mix different skills
+- Slower initially
+- Better long-term retention and transfer
+- Example: "Triangle, then cat, then house, then..."
+
+**Optimal learning:** Variable practice (mixed)
+- Start with blocked to build foundation
+- Add interleaved to test generalization
+- Or continuous mix (70/30) for robust learning
+
+**Implementation:**
+
+```python
+class HybridBatchSampler:
+    def __init__(self, dataset, structured_ratio=0.7):
+        # structured_ratio controls the mix
+        # 1.0 = pure teaching (all structured)
+        # 0.5 = balanced
+        # 0.0 = pure experience (all random)
+```
+
+**Why This Matters:**
+
+Batch composition isn't just a technical detail - it's a fundamental choice about **what kind of learning signal we provide**:
+
+- Structured: "Learn what's shared across perspectives on same thing"
+- Random: "Learn what's shared across different things"
+- Hybrid: "Learn both invariance AND generalization"
+
+This is another form of "relational learning" - the network learns relationships WITHIN batches, not just across the dataset.
+
+---
+
 ## The Path Forward: Internal GAN Architecture
 
 ### Why GAN Loss, Not MSE
