@@ -332,7 +332,15 @@ def run_consensus_training(input_folder, output_folder,
     # Load data
     all_pairs = load_image_pairs(input_folder, output_folder, img_size)
 
+    if len(all_pairs) == 0:
+        raise ValueError("No image pairs found! Check your input/output folder paths.")
+
     # Split train/test
+    if test_idx >= len(all_pairs):
+        print(f"⚠️  Warning: test_idx={test_idx} is out of range (only {len(all_pairs)} pairs)")
+        print(f"   Using last pair as test set instead\n")
+        test_idx = len(all_pairs) - 1
+
     train_pairs = [p for i, p in enumerate(all_pairs) if i != test_idx]
     test_pairs = [all_pairs[test_idx]]
 
