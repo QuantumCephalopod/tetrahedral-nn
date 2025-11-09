@@ -55,6 +55,76 @@ FIBONACCI = [1, 2, 3, 5, 8, 13, 21, 34, 55, 89]
 
 
 # ============================================================================
+# ATTENTION CURRICULUM SCHEDULER
+# ============================================================================
+
+class AttentionCurriculumScheduler:
+    """
+    Progressive attention: Learn control → interaction → full world.
+
+    Developmental learning like infants:
+      1. Control own body (mask opponent completely)
+      2. Understand immediate interaction (ball visible)
+      3. Full world model (opponent + strategy)
+
+    Mask shrinks at golden ratio intervals.
+    """
+
+    def __init__(self,
+                 control_steps=500,      # Phase 1: Pure control
+                 interaction_steps=1000,  # Phase 2: Ball interaction
+                 understanding_steps=1500, # Phase 3: Full understanding
+                 total_steps=3000):       # Phase 4: Complete model
+        self.control_steps = control_steps
+        self.interaction_steps = interaction_steps
+        self.understanding_steps = understanding_steps
+        self.total_steps = total_steps
+
+    def get_mask_amount(self, step):
+        """
+        Returns how much to mask (0.0 = no mask, 1.0 = full mask).
+
+        Shrinks at golden ratio intervals:
+          Step 0-500:   1.0 (100% masked - only your paddle)
+          Step 500-1000: 0.618 (1/φ - ball visible)
+          Step 1000-2000: 0.382 (1/φ² - opponent partially visible)
+          Step 2000-3000: 0.236 (1/φ³ - almost full view)
+          Step 3000+:    0.0 (no mask - complete view)
+        """
+        if step < self.control_steps:
+            return 1.0
+        elif step < self.interaction_steps:
+            return 1.0 / φ  # 0.618
+        elif step < self.understanding_steps:
+            return 1.0 / (φ ** 2)  # 0.382
+        elif step < self.total_steps:
+            return 1.0 / (φ ** 3)  # 0.236
+        else:
+            return 0.0
+
+    def use_difference_mode(self, step):
+        """
+        Use difference prediction during bootstrap phases.
+
+        Difference = next_frame - current_frame makes action effects obvious!
+        """
+        return step < self.understanding_steps  # First two phases
+
+    def get_phase_name(self, step):
+        """Get human-readable phase name."""
+        if step < self.control_steps:
+            return "Control (learning my paddle)"
+        elif step < self.interaction_steps:
+            return "Interaction (ball physics)"
+        elif step < self.understanding_steps:
+            return "Understanding (opponent visible)"
+        elif step < self.total_steps:
+            return "Integration (full view)"
+        else:
+            return "Complete (world model)"
+
+
+# ============================================================================
 # FRAME PREPROCESSING
 # ============================================================================
 
@@ -80,6 +150,51 @@ def preprocess_frame(frame, size=128):
     # To tensor (3, H, W) normalized
     tensor = torch.from_numpy(np.array(img, dtype=np.float32) / 255.0).permute(2, 0, 1)
     return tensor
+
+
+def apply_attention_mask(frame, mask_amount, player='bottom'):
+    """
+    Apply attention mask to focus on controllable region.
+
+    Developmental curriculum: start with own paddle, gradually expand view.
+
+    Args:
+        frame: Tensor (C, H, W) or (B, C, H, W)
+        mask_amount: 0.0 = no mask, 1.0 = full mask (only bottom visible)
+        player: 'bottom' or 'top' (which side is the agent)
+
+    Returns:
+        Masked frame (same shape as input)
+    """
+    if mask_amount == 0.0:
+        return frame  # No masking
+
+    # Handle both batched and single frames
+    is_batched = frame.dim() == 4
+    if not is_batched:
+        frame = frame.unsqueeze(0)
+
+    batch, channels, height, width = frame.shape
+
+    # Create mask
+    mask = torch.ones_like(frame)
+
+    # Mask opponent's region (top half for bottom player)
+    if player == 'bottom':
+        # Mask from top down based on mask_amount
+        mask_height = int(height * mask_amount)
+        mask[:, :, :mask_height, :] = 0.0
+    else:
+        # Mask from bottom up
+        mask_height = int(height * mask_amount)
+        mask[:, :, -mask_height:, :] = 0.0
+
+    masked_frame = frame * mask
+
+    if not is_batched:
+        masked_frame = masked_frame.squeeze(0)
+
+    return masked_frame
 
 
 # ============================================================================
@@ -398,12 +513,16 @@ class ActiveInferenceTrainer:
         # Loss scheduler
         self.loss_scheduler = BlendedLossScheduler()
 
+        # Attention curriculum (developmental learning!)
+        self.attention_curriculum = AttentionCurriculumScheduler()
+
         # Metrics
         self.step_count = 0
         self.episode_count = 0
         self.history = {
             'mse': [], 'ssim': [], 'total': [],
-            'mse_weight': [], 'ssim_weight': []
+            'mse_weight': [], 'ssim_weight': [],
+            'mask_amount': [], 'phase': []
         }
 
     def collect_experience(self, n_steps=100):
@@ -447,6 +566,7 @@ class ActiveInferenceTrainer:
         Single training step on batch from buffer.
 
         Minimizes prediction error (active inference).
+        Uses attention curriculum for developmental learning.
         """
         if len(self.buffer) < self.batch_size:
             return None
@@ -457,16 +577,40 @@ class ActiveInferenceTrainer:
         actions = actions.to(self.device)
         next_frames = next_frames.to(self.device)
 
-        # Predict next frame
-        pred_next_frames = self.model(frames, actions)
+        # === ATTENTION CURRICULUM ===
+        # Get current curriculum state
+        mask_amount = self.attention_curriculum.get_mask_amount(self.step_count)
+        use_difference = self.attention_curriculum.use_difference_mode(self.step_count)
+        phase_name = self.attention_curriculum.get_phase_name(self.step_count)
 
-        # Blended loss
+        # Apply attention mask to inputs
+        masked_frames = apply_attention_mask(frames, mask_amount, player='bottom')
+
+        # Predict next frame
+        pred_next_frames = self.model(masked_frames, actions)
+
+        # === DIFFERENCE MODE ===
+        # During early phases, predict CHANGE not STATE
+        if use_difference:
+            # Target is difference between frames
+            target = next_frames - frames
+            # Prediction is also difference
+            prediction = pred_next_frames - frames
+        else:
+            # Normal state prediction
+            target = next_frames
+            prediction = pred_next_frames
+
+        # Apply same mask to target (consistency!)
+        target = apply_attention_mask(target, mask_amount, player='bottom')
+
+        # === BLENDED LOSS ===
         mse_weight, ssim_weight = self.loss_scheduler.get_weights(self.step_count)
 
-        mse = F.mse_loss(pred_next_frames, next_frames)
+        mse = F.mse_loss(prediction, target)
 
         if ssim_weight > 0:
-            ssim = ssim_loss(pred_next_frames, next_frames)
+            ssim = ssim_loss(prediction, target)
             loss = mse_weight * mse + ssim_weight * ssim
         else:
             ssim = torch.tensor(0.0)
@@ -485,7 +629,10 @@ class ActiveInferenceTrainer:
             'ssim': ssim.item() if ssim_weight > 0 else 0.0,
             'total': loss.item(),
             'mse_weight': mse_weight,
-            'ssim_weight': ssim_weight
+            'ssim_weight': ssim_weight,
+            'mask_amount': mask_amount,
+            'phase': phase_name,
+            'difference_mode': use_difference
         }
 
         return metrics
@@ -526,15 +673,25 @@ class ActiveInferenceTrainer:
                     self.history['total'].append(metrics['total'])
                     self.history['mse_weight'].append(metrics['mse_weight'])
                     self.history['ssim_weight'].append(metrics['ssim_weight'])
+                    self.history['mask_amount'].append(metrics['mask_amount'])
+                    self.history['phase'].append(metrics['phase'])
 
             # Log
             avg_mse = np.mean(episode_metrics['mse']) if episode_metrics['mse'] else 0
             avg_ssim = np.mean(episode_metrics['ssim']) if episode_metrics['ssim'] else 0
             avg_total = np.mean(episode_metrics['total']) if episode_metrics['total'] else 0
 
+            # Current curriculum state
+            current_phase = metrics['phase'] if metrics else 'Initializing'
+            current_mask = metrics['mask_amount'] if metrics else 0.0
+            is_difference = metrics.get('difference_mode', False) if metrics else False
+
             print(f"\n📊 Episode {episode+1}/{n_episodes}")
             print(f"   Total episodes seen: {self.episode_count}")
             print(f"   Training steps: {self.step_count}")
+            print(f"   🌱 Curriculum: {current_phase}")
+            print(f"   👁️  Attention mask: {current_mask*100:.1f}% (0%=full view)")
+            print(f"   🔄 Mode: {'Difference' if is_difference else 'State'} prediction")
             print(f"   Loss (MSE): {avg_mse:.6f}")
             print(f"   Loss (SSIM): {avg_ssim:.6f}")
             print(f"   Loss (Total): {avg_total:.6f}")
@@ -602,12 +759,16 @@ class ActiveInferenceTrainer:
             'history': self.history,
             'img_size': self.img_size,
             'batch_size': self.batch_size,
-            'n_actions': self.n_actions
+            'n_actions': self.n_actions,
+            'curriculum_phase': self.attention_curriculum.get_phase_name(self.step_count),
+            'mask_amount': self.attention_curriculum.get_mask_amount(self.step_count)
         }
 
         torch.save(checkpoint, path)
         print(f"💾 Checkpoint saved to {path}")
         print(f"   Step: {self.step_count}, Episodes: {self.episode_count}")
+        print(f"   🌱 Curriculum: {checkpoint['curriculum_phase']}")
+        print(f"   👁️  Attention: {checkpoint['mask_amount']*100:.1f}% masked")
 
     def load_checkpoint(self, path='/content/drive/MyDrive/tetrahedral_checkpoints/atari_checkpoint.pt'):
         """
@@ -622,8 +783,13 @@ class ActiveInferenceTrainer:
         self.buffer.buffer = checkpoint['buffer']
         self.history = checkpoint['history']
 
+        phase = checkpoint.get('curriculum_phase', 'Unknown')
+        mask = checkpoint.get('mask_amount', 0.0)
+
         print(f"✅ Checkpoint loaded from {path}")
         print(f"   Resuming from step {self.step_count}, episode {self.episode_count}")
+        print(f"   🌱 Curriculum: {phase}")
+        print(f"   👁️  Attention: {mask*100:.1f}% masked")
         print(f"   Buffer size: {len(self.buffer)}")
 
     def save_model(self, path='/content/drive/MyDrive/saved_models/forward_model.pth'):

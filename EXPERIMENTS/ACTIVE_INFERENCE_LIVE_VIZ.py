@@ -143,6 +143,9 @@ def visualize_world_model_live(
             if metrics:
                 print(f"\n📊 Step {step}/{n_steps}")
                 print(f"   Training steps: {trainer.step_count}")
+                print(f"   🌱 Curriculum: {metrics['phase']}")
+                print(f"   👁️  Attention: {metrics['mask_amount']*100:.1f}% masked")
+                print(f"   🔄 Mode: {'Difference' if metrics.get('difference_mode', False) else 'State'}")
                 print(f"   MSE Loss: {metrics['mse']:.6f}")
                 print(f"   SSIM Loss: {metrics['ssim']:.6f}")
                 print(f"   Buffer size: {len(trainer.buffer)}")
