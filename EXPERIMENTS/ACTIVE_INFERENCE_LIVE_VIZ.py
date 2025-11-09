@@ -34,7 +34,8 @@ def visualize_world_model_live(
     n_steps=100,
     update_every=10,
     save_frames=False,
-    frame_dir='./frames'
+    frame_dir='./frames',
+    save_checkpoint_every=50
 ):
     """
     Train while visualizing predictions in real-time.
@@ -45,6 +46,7 @@ def visualize_world_model_live(
         update_every: Update visualization every N steps
         save_frames: Save frames to disk for video creation
         frame_dir: Directory to save frames
+        save_checkpoint_every: Save checkpoint every N steps (0 to disable)
     """
     if save_frames:
         frame_path = Path(frame_dir)
@@ -87,6 +89,10 @@ def visualize_world_model_live(
         # Train on batch
         if len(trainer.buffer) >= trainer.batch_size:
             metrics = trainer.train_step()
+
+            # Auto-save checkpoint
+            if save_checkpoint_every > 0 and trainer.step_count % save_checkpoint_every == 0:
+                trainer.save_checkpoint()
 
         # Visualize every N steps
         if step % update_every == 0:
@@ -157,6 +163,10 @@ def visualize_world_model_live(
         print(f"\nTo create video, run:")
         print(f"  !ffmpeg -framerate 10 -i {frame_dir}/frame_%04d.png -c:v libx264 -pix_fmt yuv420p world_model.mp4")
 
+    # Final checkpoint save
+    if save_checkpoint_every > 0:
+        trainer.save_checkpoint()
+
     print("\n✅ Visualization complete!\n")
 
 
@@ -164,12 +174,18 @@ def visualize_world_model_live(
 # CONTINUE TRAINING (NON-VISUAL)
 # ============================================================================
 
-def continue_training(trainer, n_episodes=5, train_steps_per_episode=50):
+def continue_training(trainer, n_episodes=5, train_steps_per_episode=50, save_checkpoint=True):
     """
     Continue training without visualization (faster).
 
     Use this to accumulate more experience quickly,
     then use visualize_world_model_live() to see results.
+
+    Args:
+        trainer: ActiveInferenceTrainer instance
+        n_episodes: Number of episodes to run
+        train_steps_per_episode: Training steps per episode
+        save_checkpoint: Save checkpoint after training
     """
     print("\n" + "="*70)
     print("⚡ CONTINUE TRAINING")
@@ -213,6 +229,11 @@ def continue_training(trainer, n_episodes=5, train_steps_per_episode=50):
     steps_trained = trainer.step_count - start_step
 
     print(f"\n✅ Trained {episodes_trained} episodes, {steps_trained} steps")
+
+    # Save checkpoint
+    if save_checkpoint:
+        trainer.save_checkpoint()
+
     print("="*70 + "\n")
 
 

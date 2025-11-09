@@ -585,8 +585,49 @@ class ActiveInferenceTrainer:
 
         self.model.train()
 
+    def save_checkpoint(self, path='/content/drive/MyDrive/tetrahedral_checkpoints/atari_checkpoint.pt'):
+        """
+        Save full checkpoint: model, optimizer, buffer, metrics.
+
+        Use this instead of save_model() to preserve training state.
+        """
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+        checkpoint = {
+            'step_count': self.step_count,
+            'episode_count': self.episode_count,
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'buffer': self.buffer.buffer,  # Save the deque
+            'history': self.history,
+            'img_size': self.img_size,
+            'batch_size': self.batch_size,
+            'n_actions': self.n_actions
+        }
+
+        torch.save(checkpoint, path)
+        print(f"💾 Checkpoint saved to {path}")
+        print(f"   Step: {self.step_count}, Episodes: {self.episode_count}")
+
+    def load_checkpoint(self, path='/content/drive/MyDrive/tetrahedral_checkpoints/atari_checkpoint.pt'):
+        """
+        Load full checkpoint and resume training.
+        """
+        checkpoint = torch.load(path, map_location=self.device)
+
+        self.step_count = checkpoint['step_count']
+        self.episode_count = checkpoint['episode_count']
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.buffer.buffer = checkpoint['buffer']
+        self.history = checkpoint['history']
+
+        print(f"✅ Checkpoint loaded from {path}")
+        print(f"   Resuming from step {self.step_count}, episode {self.episode_count}")
+        print(f"   Buffer size: {len(self.buffer)}")
+
     def save_model(self, path='/content/drive/MyDrive/saved_models/forward_model.pth'):
-        """Save model checkpoint."""
+        """Save model weights only (for deployment, not resuming training)."""
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         torch.save(self.model.state_dict(), path)
         print(f"✓ Model saved to {path}")
