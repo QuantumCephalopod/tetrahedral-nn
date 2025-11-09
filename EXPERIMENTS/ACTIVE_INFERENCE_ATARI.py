@@ -152,16 +152,21 @@ def preprocess_frame(frame, size=128):
     return tensor
 
 
-def apply_attention_mask(frame, mask_amount, player='bottom'):
+def apply_attention_mask(frame, mask_amount, player='right'):
     """
     Apply attention mask to focus on controllable region.
 
     Developmental curriculum: start with own paddle, gradually expand view.
 
+    Pong is played LEFT-RIGHT (paddles on sides, not top/bottom):
+      - Player paddle: right side (usually)
+      - Opponent paddle: left side
+      - Ball: moves horizontally between paddles
+
     Args:
         frame: Tensor (C, H, W) or (B, C, H, W)
-        mask_amount: 0.0 = no mask, 1.0 = full mask (only bottom visible)
-        player: 'bottom' or 'top' (which side is the agent)
+        mask_amount: 0.0 = no mask, 1.0 = full mask (only player's side visible)
+        player: 'right' or 'left' (which side is the agent's paddle)
 
     Returns:
         Masked frame (same shape as input)
@@ -179,19 +184,19 @@ def apply_attention_mask(frame, mask_amount, player='bottom'):
     # Create mask
     mask = torch.ones_like(frame)
 
-    # Mask opponent's region (top half for bottom player)
-    if player == 'bottom':
-        # Opponent occupies top half of screen
-        # mask_amount=1.0 → mask entire top half (rows 0 to height/2)
-        # mask_amount=0.5 → mask top quarter (rows 0 to height/4)
-        opponent_region_height = height // 2
-        mask_height = int(opponent_region_height * mask_amount)
-        mask[:, :, :mask_height, :] = 0.0
+    # Mask opponent's region (LEFT-RIGHT for Pong!)
+    if player == 'right':
+        # Player on right, opponent on left
+        # mask_amount=1.0 → mask entire left half (columns 0 to width/2)
+        # mask_amount=0.618 → mask left 30.9% of screen
+        opponent_region_width = width // 2
+        mask_width = int(opponent_region_width * mask_amount)
+        mask[:, :, :, :mask_width] = 0.0
     else:
-        # Opponent occupies bottom half
-        opponent_region_height = height // 2
-        mask_height = int(opponent_region_height * mask_amount)
-        mask[:, :, -mask_height:, :] = 0.0
+        # Player on left, opponent on right
+        opponent_region_width = width // 2
+        mask_width = int(opponent_region_width * mask_amount)
+        mask[:, :, :, -mask_width:] = 0.0
 
     masked_frame = frame * mask
 
@@ -588,7 +593,7 @@ class ActiveInferenceTrainer:
         phase_name = self.attention_curriculum.get_phase_name(self.step_count)
 
         # Apply attention mask to inputs
-        masked_frames = apply_attention_mask(frames, mask_amount, player='bottom')
+        masked_frames = apply_attention_mask(frames, mask_amount, player='right')
 
         # Predict next frame
         pred_next_frames = self.model(masked_frames, actions)
@@ -606,7 +611,7 @@ class ActiveInferenceTrainer:
             prediction = pred_next_frames
 
         # Apply same mask to target (consistency!)
-        target = apply_attention_mask(target, mask_amount, player='bottom')
+        target = apply_attention_mask(target, mask_amount, player='right')
 
         # === BLENDED LOSS ===
         mse_weight, ssim_weight = self.loss_scheduler.get_weights(self.step_count)

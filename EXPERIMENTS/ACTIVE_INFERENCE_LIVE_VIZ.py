@@ -72,11 +72,18 @@ def visualize_world_model_live(
         # Random action
         action = trainer.policy.select_action(frame)
 
-        # Model prediction
+        # Get current curriculum state for visualization
+        mask_amount = trainer.attention_curriculum.get_mask_amount(trainer.step_count)
+
+        # Apply mask to show what model actually sees
+        from ACTIVE_INFERENCE_ATARI import apply_attention_mask
+        masked_frame = apply_attention_mask(frame, mask_amount, player='right')
+
+        # Model prediction (uses masked input)
         with torch.no_grad():
-            frame_batch = frame.unsqueeze(0).to(trainer.device)
+            masked_frame_batch = masked_frame.unsqueeze(0).to(trainer.device)
             action_batch = torch.tensor([action], dtype=torch.long).to(trainer.device)
-            predicted_next = trainer.model(frame_batch, action_batch)
+            predicted_next = trainer.model(masked_frame_batch, action_batch)
             predicted_next = predicted_next.squeeze(0).cpu()
 
         # Take action in environment
@@ -99,35 +106,41 @@ def visualize_world_model_live(
         if step % update_every == 0:
             clear_output(wait=True)
 
-            fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+            fig, axes = plt.subplots(1, 5, figsize=(20, 4))
 
-            # Current frame
+            # Full game (observer view)
             axes[0].imshow(frame.permute(1, 2, 0).numpy())
-            axes[0].set_title(f'Current Frame\nStep {step}\nAction: {action}',
+            axes[0].set_title(f'Observer View\n(Full Game)',
                             fontsize=12, fontweight='bold')
             axes[0].axis('off')
 
-            # Predicted next
-            pred_img = predicted_next.permute(1, 2, 0).numpy().clip(0, 1)
-            axes[1].imshow(pred_img)
-            axes[1].set_title('Predicted Next\n(World Model)',
-                            fontsize=12, fontweight='bold', color='blue')
+            # What model sees (masked)
+            axes[1].imshow(masked_frame.permute(1, 2, 0).numpy())
+            axes[1].set_title(f'Model Input (Masked)\nStep {step} | Action: {action}\nMask: {mask_amount*100:.0f}%',
+                            fontsize=12, fontweight='bold', color='purple')
             axes[1].axis('off')
 
-            # Actual next
-            axes[2].imshow(next_frame.permute(1, 2, 0).numpy())
-            axes[2].set_title('Actual Next\n(Reality)',
-                            fontsize=12, fontweight='bold', color='green')
+            # Predicted next
+            pred_img = predicted_next.permute(1, 2, 0).numpy().clip(0, 1)
+            axes[2].imshow(pred_img)
+            axes[2].set_title('Predicted Next\n(World Model)',
+                            fontsize=12, fontweight='bold', color='blue')
             axes[2].axis('off')
+
+            # Actual next
+            axes[3].imshow(next_frame.permute(1, 2, 0).numpy())
+            axes[3].set_title('Actual Next\n(Reality)',
+                            fontsize=12, fontweight='bold', color='green')
+            axes[3].axis('off')
 
             # Prediction error (absolute difference)
             error = torch.abs(predicted_next - next_frame)
             error_img = error.permute(1, 2, 0).numpy()
-            im = axes[3].imshow(error_img, cmap='hot')
-            axes[3].set_title(f'Prediction Error\nMSE: {metrics["mse"]:.6f}' if metrics else 'Prediction Error',
+            im = axes[4].imshow(error_img, cmap='hot')
+            axes[4].set_title(f'Prediction Error\nMSE: {metrics["mse"]:.6f}' if metrics else 'Prediction Error',
                             fontsize=12, fontweight='bold', color='red')
-            axes[3].axis('off')
-            plt.colorbar(im, ax=axes[3])
+            axes[4].axis('off')
+            plt.colorbar(im, ax=axes[4])
 
             plt.tight_layout()
 
