@@ -181,12 +181,16 @@ def apply_attention_mask(frame, mask_amount, player='bottom'):
 
     # Mask opponent's region (top half for bottom player)
     if player == 'bottom':
-        # Mask from top down based on mask_amount
-        mask_height = int(height * mask_amount)
+        # Opponent occupies top half of screen
+        # mask_amount=1.0 → mask entire top half (rows 0 to height/2)
+        # mask_amount=0.5 → mask top quarter (rows 0 to height/4)
+        opponent_region_height = height // 2
+        mask_height = int(opponent_region_height * mask_amount)
         mask[:, :, :mask_height, :] = 0.0
     else:
-        # Mask from bottom up
-        mask_height = int(height * mask_amount)
+        # Opponent occupies bottom half
+        opponent_region_height = height // 2
+        mask_height = int(opponent_region_height * mask_amount)
         mask[:, :, -mask_height:, :] = 0.0
 
     masked_frame = frame * mask
