@@ -601,17 +601,15 @@ class ActiveInferenceTrainer:
         # === DIFFERENCE MODE ===
         # During early phases, predict CHANGE not STATE
         if use_difference:
-            # Target is difference between frames
-            target = next_frames - frames
-            # Prediction is also difference
-            prediction = pred_next_frames - frames
+            # IMPORTANT: Compute difference using MASKED frames!
+            # Model only sees masked input, so target should also be masked difference
+            masked_next_frames = apply_attention_mask(next_frames, mask_amount, player='right')
+            target = masked_next_frames - masked_frames  # Masked difference
+            prediction = pred_next_frames - masked_frames  # Prediction relative to masked input
         else:
-            # Normal state prediction
-            target = next_frames
+            # Normal state prediction (also masked!)
+            target = apply_attention_mask(next_frames, mask_amount, player='right')
             prediction = pred_next_frames
-
-        # Apply same mask to target (consistency!)
-        target = apply_attention_mask(target, mask_amount, player='right')
 
         # === BLENDED LOSS ===
         mse_weight, ssim_weight = self.loss_scheduler.get_weights(self.step_count)
