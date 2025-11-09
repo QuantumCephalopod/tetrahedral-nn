@@ -35,6 +35,8 @@ from pathlib import Path
 import cv2
 import random
 import math
+from skimage.metrics import structural_similarity as ssim
+from scipy.ndimage import zoom
 
 # Assumes DualTetrahedralNetwork is already imported
 # If not: from Z_COUPLING.Z_interface_coupling import DualTetrahedralNetwork
