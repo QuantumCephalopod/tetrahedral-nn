@@ -69,11 +69,19 @@ def visualize_world_model_live(
     frame_count = 0
 
     for step in range(n_steps):
-        # Random action
-        action = trainer.policy.select_action(frame)
-
         # Get current curriculum state for visualization
         mask_amount = trainer.attention_curriculum.get_mask_amount(trainer.step_count)
+
+        # Sync policy step counter
+        from ACTIVE_INFERENCE_ATARI import ActiveInferencePolicy
+        if isinstance(trainer.policy, ActiveInferencePolicy):
+            trainer.policy.update_step(trainer.step_count)
+
+        # Select action (uses world model if ActiveInferencePolicy!)
+        if isinstance(trainer.policy, ActiveInferencePolicy):
+            action = trainer.policy.select_action(frame, mask_amount=mask_amount)
+        else:
+            action = trainer.policy.select_action(frame)
 
         # Apply mask to show what model actually sees
         from ACTIVE_INFERENCE_ATARI import apply_attention_mask

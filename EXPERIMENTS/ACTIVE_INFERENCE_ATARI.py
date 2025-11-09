@@ -321,6 +321,149 @@ class RandomPolicy:
 
 
 # ============================================================================
+# ACTIVE INFERENCE POLICY (Curiosity-Driven)
+# ============================================================================
+
+class ActiveInferencePolicy:
+    """
+    Select actions based on expected free energy.
+
+    This is the CORE of active inference:
+      - Model predicts outcome of each possible action
+      - Compute expected free energy for each action
+      - Select action that optimizes learning (not reward!)
+
+    Philosophy:
+      - Early phases (high β): Seek SURPRISE (high free energy = explore)
+      - Later phases (low β): Seek CERTAINTY (low free energy = exploit)
+
+    Free Energy = Prediction Error - β × Entropy
+      - Prediction Error: How uncertain is the prediction?
+      - Entropy: How diverse are the possible outcomes?
+      - β: Exploration coefficient (curriculum-dependent)
+
+    The Strange Loop closes here!
+    """
+
+    def __init__(self,
+                 model: ForwardModel,
+                 curriculum_scheduler: 'AttentionCurriculumScheduler',
+                 free_energy_scheduler: 'FreeEnergyScheduler',
+                 device: str = 'cpu',
+                 temperature: float = 1.0,
+                 use_model: bool = True):
+        """
+        Args:
+            model: ForwardModel for predictions
+            curriculum_scheduler: Attention curriculum (for β)
+            free_energy_scheduler: Free energy scheduler
+            device: 'cpu' or 'cuda'
+            temperature: Softmax temperature for stochastic selection (1.0=standard, higher=more random)
+            use_model: If False, falls back to random (for ablation studies)
+        """
+        self.model = model
+        self.curriculum_scheduler = curriculum_scheduler
+        self.free_energy_scheduler = free_energy_scheduler
+        self.device = device
+        self.temperature = temperature
+        self.use_model = use_model
+        self.n_actions = model.n_actions
+        self.step_count = 0
+
+    def select_action(self, state: torch.Tensor, mask_amount: float = 0.0) -> int:
+        """
+        Select action by querying world model.
+
+        Information flow:
+          1. For each possible action, predict next state
+          2. Compute expected free energy (uncertainty + diversity)
+          3. Select action that maximizes learning opportunity
+
+        Args:
+            state: Current frame (C, H, W) tensor
+            mask_amount: Current attention mask amount (for masked prediction)
+
+        Returns:
+            Selected action index
+        """
+        if not self.use_model:
+            # Fallback to random (for comparison)
+            return random.randint(0, self.n_actions - 1)
+
+        self.model.eval()
+
+        with torch.no_grad():
+            # Prepare state
+            if state.dim() == 3:
+                state = state.unsqueeze(0)  # (1, C, H, W)
+            state = state.to(self.device)
+
+            # Apply attention mask (model only sees what curriculum allows!)
+            masked_state = apply_attention_mask(state, mask_amount, player='right')
+
+            # === PREDICT OUTCOMES FOR ALL ACTIONS ===
+            predicted_outcomes = []
+            free_energies = []
+
+            for action_idx in range(self.n_actions):
+                # Predict next state for this action
+                action_tensor = torch.tensor([action_idx], dtype=torch.long, device=self.device)
+                predicted_next = self.model(masked_state, action_tensor)
+
+                # Store prediction
+                predicted_outcomes.append(predicted_next)
+
+                # === COMPUTE EXPECTED FREE ENERGY ===
+                # This is what makes it active inference!
+
+                # 1. Prediction uncertainty (variance of prediction)
+                #    High variance = model is uncertain about this action
+                prediction_variance = torch.var(predicted_next)
+
+                # 2. Prediction entropy (diversity of outcomes)
+                #    High entropy = diverse/interesting outcome
+                entropy = prediction_variance  # Simple entropy measure
+
+                # 3. Get current β (exploration coefficient)
+                beta = self.free_energy_scheduler.get_beta(
+                    self.step_count,
+                    self.curriculum_scheduler
+                )
+
+                # 4. Expected Free Energy = Uncertainty - β × Entropy
+                #    Early phases (high β): Prefer HIGH entropy (explore!)
+                #    Late phases (low β): Prefer LOW uncertainty (exploit!)
+                expected_free_energy = prediction_variance - beta * entropy
+
+                free_energies.append(expected_free_energy.item())
+
+            # === ACTION SELECTION ===
+            free_energies_tensor = torch.tensor(free_energies)
+
+            # During high exploration (high β):
+            #   - High entropy gets negative bonus → LOW free energy → PREFERRED
+            #   - We want to MINIMIZE free energy → seek high entropy (exploration)
+            #
+            # During low exploration (low β):
+            #   - Low uncertainty → LOW free energy → PREFERRED
+            #   - We want to MINIMIZE free energy → seek certainty (exploitation)
+
+            # Use softmax with temperature for stochastic selection
+            # Lower free energy = higher probability
+            action_probs = F.softmax(-free_energies_tensor / self.temperature, dim=0)
+
+            # Sample action
+            action = torch.multinomial(action_probs, num_samples=1).item()
+
+        self.model.train()
+        return action
+
+    def update_step(self, step_count: int):
+        """Update internal step counter for curriculum sync."""
+        self.step_count = step_count
+
+
+# ============================================================================
 # EXPERIENCE BUFFER
 # ============================================================================
 
@@ -492,7 +635,9 @@ class ActiveInferenceTrainer:
         base_lr=0.0001,
         buffer_capacity=10000,
         batch_size=16,
-        device=None
+        device=None,
+        use_active_inference_policy=True,
+        policy_temperature=1.0
     ):
         # Auto-detect device
         if device is None:
@@ -502,6 +647,7 @@ class ActiveInferenceTrainer:
         print(f"🖥️  Device: {self.device}")
         self.img_size = img_size
         self.batch_size = batch_size
+        self.use_active_inference_policy = use_active_inference_policy
 
         # Create environment
         print(f"\n🎮 Creating environment: {env_name}")
@@ -516,7 +662,7 @@ class ActiveInferenceTrainer:
             img_size=img_size,
             latent_dim=latent_dim,
             n_actions=self.n_actions
-        ).to(device)
+        ).to(self.device)
 
         total_params = sum(p.numel() for p in self.model.parameters())
         print(f"   Parameters: {total_params:,}")
@@ -568,9 +714,6 @@ class ActiveInferenceTrainer:
         # Experience buffer
         self.buffer = ExperienceBuffer(capacity=buffer_capacity)
 
-        # Random policy (exploration)
-        self.policy = RandomPolicy(self.n_actions)
-
         # Loss scheduler
         self.loss_scheduler = BlendedLossScheduler()
 
@@ -579,6 +722,24 @@ class ActiveInferenceTrainer:
 
         # Free energy scheduler (exploration!)
         self.free_energy_scheduler = FreeEnergyScheduler()
+
+        # Policy (CLOSES THE STRANGE LOOP!)
+        if use_active_inference_policy:
+            print(f"\n🎯 Creating Active Inference Policy...")
+            print(f"   Temperature: {policy_temperature}")
+            print(f"   Mode: Curiosity-driven (uses world model!)")
+            self.policy = ActiveInferencePolicy(
+                model=self.model,
+                curriculum_scheduler=self.attention_curriculum,
+                free_energy_scheduler=self.free_energy_scheduler,
+                device=self.device,
+                temperature=policy_temperature,
+                use_model=True
+            )
+        else:
+            print(f"\n🎲 Creating Random Policy...")
+            print(f"   Mode: Pure exploration (ignores world model)")
+            self.policy = RandomPolicy(self.n_actions)
 
         # Metrics
         self.step_count = 0
@@ -592,7 +753,10 @@ class ActiveInferenceTrainer:
 
     def collect_experience(self, n_steps=100):
         """
-        Collect transitions by taking random actions.
+        Collect transitions using current policy.
+
+        If using ActiveInferencePolicy, actions are selected based on
+        expected free energy (curiosity-driven exploration).
 
         Returns:
             Number of episodes completed
@@ -604,8 +768,18 @@ class ActiveInferenceTrainer:
         episodes_done = 0
 
         for step in range(n_steps):
-            # Random action
-            action = self.policy.select_action(frame)
+            # Get current curriculum state
+            mask_amount = self.attention_curriculum.get_mask_amount(self.step_count)
+
+            # Sync policy step counter (for curriculum-aware action selection)
+            if isinstance(self.policy, ActiveInferencePolicy):
+                self.policy.update_step(self.step_count)
+
+            # Select action (uses world model if ActiveInferencePolicy!)
+            if isinstance(self.policy, ActiveInferencePolicy):
+                action = self.policy.select_action(frame, mask_amount=mask_amount)
+            else:
+                action = self.policy.select_action(frame)
 
             # Take action
             next_frame_raw, reward, terminated, truncated, info = self.env.step(action)
@@ -622,8 +796,10 @@ class ActiveInferenceTrainer:
                 frame = preprocess_frame(frame, self.img_size)
                 episodes_done += 1
 
+        policy_type = "Active Inference" if isinstance(self.policy, ActiveInferencePolicy) else "Random"
         print(f"   ✓ Collected {len(self.buffer)} total transitions")
         print(f"   ✓ Completed {episodes_done} episodes")
+        print(f"   ✓ Policy: {policy_type}")
         return episodes_done
 
     def train_step(self):
