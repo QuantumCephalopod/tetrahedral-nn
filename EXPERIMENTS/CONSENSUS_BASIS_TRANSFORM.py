@@ -1,20 +1,23 @@
 """
-CONSENSUS_ONLY - Pure Consensus Training (No MSE Comparison)
-=============================================================
+CONSENSUS_BASIS_TRANSFORM - W/X/Y/Z Consensus Image Transformation
+===================================================================
 
-Single-focus experiment: Train with consensus loss ONLY.
-No comparisons, no MSE, no distractions.
+Single-cell experiment combining:
+  - W (Geometry): Tetrahedral basis structure
+  - X (Linear): Smooth manifold perspective
+  - Y (Nonlinear): Boundary detection perspective
+  - Z (Coupling): Inter-face consensus negotiation
+  - Pareto batching: Low structured ratio (20%) for natural learning
 
 Philosophy:
-  "Reality emerges from perspective agreement, not ground truth matching."
+  "Reality emerges from negotiated agreement between complementary
+   geometric perspectives, not from matching privileged ground truth."
+
+This is the CLEAN version - no MSE comparison, pure consensus.
 
 Author: Philipp Remy Bartholomäus
 Date: November 2025
 """
-
-# ============================================================================
-# COLAB CELL: Consensus Training Only
-# ============================================================================
 
 import torch
 import torch.nn as nn
@@ -28,21 +31,25 @@ from pathlib import Path
 import cv2
 import random
 
-# Assumes DualTetrahedralNetwork is already imported or available
+# Assumes DualTetrahedralNetwork is already imported
 # If not: from Z_COUPLING.Z_interface_coupling import DualTetrahedralNetwork
 
 
-# ----------------------------------------------------------------------------
-# Image Loading
-# ----------------------------------------------------------------------------
+# ============================================================================
+# IMAGE LOADING
+# ============================================================================
 
 def load_image_pairs(input_folder, output_folder, img_size=128):
     """Load all image pairs from folders."""
     input_path = Path(input_folder)
     output_path = Path(output_folder)
 
-    input_files = sorted(list(input_path.glob('*.png')) + list(input_path.glob('*.jpg')) + list(input_path.glob('*.webp')))
-    output_files = sorted(list(output_path.glob('*.png')) + list(output_path.glob('*.jpg')) + list(output_path.glob('*.webp')))
+    input_files = sorted(list(input_path.glob('*.png')) +
+                        list(input_path.glob('*.jpg')) +
+                        list(input_path.glob('*.webp')))
+    output_files = sorted(list(output_path.glob('*.png')) +
+                         list(output_path.glob('*.jpg')) +
+                         list(output_path.glob('*.webp')))
 
     pairs = []
     print(f"📂 Loading {len(input_files)} image pairs...")
@@ -60,12 +67,12 @@ def load_image_pairs(input_folder, output_folder, img_size=128):
     return pairs
 
 
-# ----------------------------------------------------------------------------
-# Multi-Representation Transforms
-# ----------------------------------------------------------------------------
+# ============================================================================
+# MULTI-REPRESENTATION TRANSFORMS (Basis Projections)
+# ============================================================================
 
 def create_edge_version(img: torch.Tensor) -> torch.Tensor:
-    """Create edge-detected version using Canny."""
+    """Edge representation - emphasizes boundaries (Y/Nonlinear basis)."""
     img_np = img.permute(1, 2, 0).numpy()
     gray = cv2.cvtColor((img_np * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
     edges = cv2.Canny(gray, 50, 150)
@@ -74,7 +81,7 @@ def create_edge_version(img: torch.Tensor) -> torch.Tensor:
 
 
 def create_grayscale_version(img: torch.Tensor) -> torch.Tensor:
-    """Create grayscale version."""
+    """Grayscale representation - smooth intensity (X/Linear basis)."""
     img_np = img.permute(1, 2, 0).numpy()
     gray = cv2.cvtColor((img_np * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
     gray_3ch = np.stack([gray, gray, gray], axis=2) / 255.0
@@ -82,7 +89,7 @@ def create_grayscale_version(img: torch.Tensor) -> torch.Tensor:
 
 
 def create_dithered_version(img: torch.Tensor) -> torch.Tensor:
-    """Create simple binary dithered version."""
+    """Binary dithered - discrete decision boundaries (Y/Nonlinear basis)."""
     img_np = (img.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
     dithered = (gray > 128).astype(np.uint8) * 255
@@ -90,23 +97,25 @@ def create_dithered_version(img: torch.Tensor) -> torch.Tensor:
     return torch.from_numpy(dithered_3ch).permute(2, 0, 1).float()
 
 
-# ----------------------------------------------------------------------------
-# Multi-Representation Dataset
-# ----------------------------------------------------------------------------
+# ============================================================================
+# BASIS-AWARE DATASET
+# ============================================================================
 
-class MultiRepDataset(Dataset):
+class BasisDataset(Dataset):
     """
-    Dataset with 4 representations per sample:
-      0. Original RGB
-      1. Edge-detected
-      2. Grayscale
-      3. Dithered
+    Dataset with 4 basis projections per sample:
+      0. RGB (Full W basis)
+      1. Edge (Y/Nonlinear emphasis)
+      2. Grayscale (X/Linear emphasis)
+      3. Dithered (Y/Nonlinear discrete)
+
+    This teaches the network to see through different geometric lenses.
     """
 
     def __init__(self, image_pairs, apply_augmentation=True):
         self.base_pairs = []
 
-        # Simple augmentation (4 rotations × 2 flips = 8)
+        # Geometric augmentation (4 rotations × 2 flips = 8)
         for input_img, output_img in image_pairs:
             if apply_augmentation:
                 augs_in = self._augment(input_img)
@@ -117,15 +126,16 @@ class MultiRepDataset(Dataset):
                 self.base_pairs.append((input_img, output_img))
 
         self.n_base = len(self.base_pairs)
-        print(f"  Base pairs: {self.n_base}, Total samples: {self.n_base * 4}")
+        print(f"  Base pairs: {self.n_base}")
+        print(f"  Total samples: {self.n_base * 4} (×4 basis projections)")
 
     def _augment(self, img):
-        """4 rotations × 2 flips = 8 augmentations."""
+        """8 geometric transformations preserving tetrahedral symmetry."""
         augs = []
-        for k in range(4):
+        for k in range(4):  # 4 rotations
             rotated = torch.rot90(img, k=k, dims=[1, 2])
             augs.append(rotated)
-            augs.append(torch.flip(rotated, dims=[2]))
+            augs.append(torch.flip(rotated, dims=[2]))  # + mirror
         return augs
 
     def __len__(self):
@@ -133,39 +143,47 @@ class MultiRepDataset(Dataset):
 
     def __getitem__(self, idx):
         base_idx = idx // 4
-        rep_type = idx % 4
+        basis_type = idx % 4  # Which basis projection
         input_img, output_img = self.base_pairs[base_idx]
 
-        # Create representation
-        if rep_type == 0:
-            inp, out = input_img, output_img
-        elif rep_type == 1:
-            inp = create_edge_version(input_img)
+        # Project onto basis
+        if basis_type == 0:
+            inp, out = input_img, output_img  # RGB (full)
+        elif basis_type == 1:
+            inp = create_edge_version(input_img)  # Y basis
             out = create_edge_version(output_img)
-        elif rep_type == 2:
-            inp = create_grayscale_version(input_img)
+        elif basis_type == 2:
+            inp = create_grayscale_version(input_img)  # X basis
             out = create_grayscale_version(output_img)
         else:
-            inp = create_dithered_version(input_img)
+            inp = create_dithered_version(input_img)  # Y basis (discrete)
             out = create_dithered_version(output_img)
 
-        return inp.reshape(-1), out.reshape(-1), base_idx, rep_type
+        return inp.reshape(-1), out.reshape(-1), base_idx, basis_type
 
 
-# ----------------------------------------------------------------------------
-# Hybrid Batch Sampler
-# ----------------------------------------------------------------------------
+# ============================================================================
+# PARETO BATCH SAMPLER (Power-law structured batching)
+# ============================================================================
 
-class HybridBatchSampler(Sampler):
+class ParetoBatchSampler(Sampler):
     """
-    Mix structured and random batches.
+    Pareto-distributed structured batching.
 
-    structured_ratio=1.0: All batches have same base pair, 4 reps (teaching)
-    structured_ratio=0.5: 50% structured, 50% random (balanced)
-    structured_ratio=0.0: Fully random batches (real-world experience)
+    Low structured_ratio (e.g., 0.2) creates power-law distribution:
+      - Few highly structured batches (same image, 4 basis views)
+      - Many random batches (diverse experience)
+
+    This mimics natural learning: occasional deep focus, mostly diverse exploration.
+
+    Args:
+        structured_ratio: 0.0-1.0
+            0.2 = 20% structured (Pareto-optimal)
+            0.5 = balanced
+            1.0 = all structured
     """
 
-    def __init__(self, dataset, structured_ratio=0.5, shuffle=True):
+    def __init__(self, dataset, structured_ratio=0.2, shuffle=True):
         self.n_base = dataset.n_base
         self.total_samples = len(dataset)
         self.structured_ratio = structured_ratio
@@ -180,13 +198,15 @@ class HybridBatchSampler(Sampler):
         if self.shuffle:
             random.shuffle(base_indices)
 
-        # Structured batches (same base pair, all 4 reps)
+        # Structured batches: same image, 4 basis projections
+        # This is "teaching mode" - network sees complementary views
         for i in range(n_structured):
             base_idx = base_indices[i]
-            batch = [base_idx * 4 + rep for rep in range(4)]
+            batch = [base_idx * 4 + b for b in range(4)]
             batches.append(batch)
 
-        # Random batches (any 4 samples)
+        # Random batches: diverse samples
+        # This is "experience mode" - network generalizes
         all_indices = list(range(self.total_samples))
         if self.shuffle:
             random.shuffle(all_indices)
@@ -206,16 +226,20 @@ class HybridBatchSampler(Sampler):
         return self.n_base
 
 
-# ----------------------------------------------------------------------------
-# Consensus Training Loop
-# ----------------------------------------------------------------------------
+# ============================================================================
+# CONSENSUS TRAINING (X ↔ Y Negotiation)
+# ============================================================================
 
-def train_consensus(model, loader, optimizer, device, latent_dim=128,
-                    consensus_weight=0.6, target_weight=0.4):
+def train_consensus_step(model, loader, optimizer, device, latent_dim=128,
+                         consensus_weight=0.65, target_weight=0.35):
     """
-    Train with consensus loss.
+    One epoch of consensus training.
 
-    Loss = 0.6 * agreement(Linear, Nonlinear) + 0.4 * target_guidance
+    The two networks (X/Linear and Y/Nonlinear) negotiate reality:
+      - 65%: Internal coherence (they must agree)
+      - 35%: External coherence (orbit around target)
+
+    This is Z-coupling in action: faces negotiate through attention.
     """
     model.train()
     total_loss = 0.0
@@ -230,23 +254,26 @@ def train_consensus(model, loader, optimizer, device, latent_dim=128,
 
         optimizer.zero_grad()
 
-        # Forward through both networks
+        # === FORWARD: Both perspectives process input ===
         lin_v, lin_f = model.linear_net(batch_x, return_faces=True)
         non_v, non_f = model.nonlinear_net(batch_x, return_faces=True)
 
-        # Couple faces
+        # === Z-COUPLING: Face-to-face negotiation ===
         coupled_l = [model.linear_to_nonlinear[i](lin_f[:, i], non_f[:, i]) for i in range(4)]
         coupled_n = [model.nonlinear_to_linear[i](non_f[:, i], lin_f[:, i]) for i in range(4)]
 
+        # Update vertices from face coupling
         lin_v = model.linear_net.update_from_faces(lin_v, [f * 0.5 for f in coupled_l])
         non_v = model.nonlinear_net.update_from_faces(non_v, [f * 0.5 for f in coupled_n])
 
-        # Get separate network outputs
+        # === GET SEPARATE OUTPUTS (key to consensus!) ===
+        # Linear perspective sees only its own vertices
         lin_vertices_only = torch.cat([
             lin_v.reshape(bs, -1),
             torch.zeros(bs, latent_dim * 4, device=device)
         ], dim=-1)
 
+        # Nonlinear perspective sees only its own vertices
         non_vertices_only = torch.cat([
             torch.zeros(bs, latent_dim * 4, device=device),
             non_v.reshape(bs, -1)
@@ -255,14 +282,15 @@ def train_consensus(model, loader, optimizer, device, latent_dim=128,
         linear_output = model.output_projection(lin_vertices_only)
         nonlinear_output = model.output_projection(non_vertices_only)
 
-        # CONSENSUS LOSS: Networks must agree
+        # === CONSENSUS LOSS: Perspectives must agree (internal coherence) ===
         consensus_loss = F.mse_loss(linear_output, nonlinear_output)
 
-        # TARGET GUIDANCE: Both orbit around target
+        # === TARGET LOSS: Both orbit around ground truth (external coherence) ===
         target_loss = (F.mse_loss(linear_output, batch_y) +
                       F.mse_loss(nonlinear_output, batch_y)) / 2
 
-        # Combined loss
+        # === WEIGHTED COMBINATION ===
+        # More weight on agreement than on matching target!
         loss = consensus_weight * consensus_loss + target_weight * target_loss
 
         loss.backward()
@@ -277,7 +305,7 @@ def train_consensus(model, loader, optimizer, device, latent_dim=128,
 
 
 def evaluate(model, loader, device):
-    """Simple MSE evaluation."""
+    """Evaluate using combined output (not separate perspectives)."""
     model.eval()
     total_loss = 0.0
 
@@ -287,29 +315,30 @@ def evaluate(model, loader, device):
             batch_x = batch_x.to(device)
             batch_y = batch_y.to(device)
 
+            # Combined output (what the user sees)
             output = model(batch_x)
             total_loss += F.mse_loss(output, batch_y).item()
 
     return total_loss / len(loader)
 
 
-# ----------------------------------------------------------------------------
-# Main Training Function
-# ----------------------------------------------------------------------------
+# ============================================================================
+# MAIN EXPERIMENT
+# ============================================================================
 
-def run_consensus_training(input_folder, output_folder,
-                          img_size=128, latent_dim=128,
-                          epochs=100, test_idx=6,
-                          structured_ratio=0.5,
-                          consensus_weight=0.6, target_weight=0.4,
-                          device=None):
+def run_basis_consensus(input_folder, output_folder,
+                       img_size=128, latent_dim=128,
+                       epochs=300, test_idx=6,
+                       structured_ratio=0.2,  # Pareto-optimal
+                       consensus_weight=0.65, target_weight=0.35,
+                       device=None):
     """
-    Run consensus training.
+    Run W/X/Y/Z basis consensus training.
 
     Args:
-        structured_ratio: 0.0-1.0, ratio of structured batches
-                         1.0 = all structured (same pair, 4 reps)
-                         0.0 = all random
+        structured_ratio: 0.2 recommended (Pareto principle)
+        consensus_weight: 0.65 = agreement more important than target
+        target_weight: 0.35 = external guidance
 
     Returns:
         model, history
@@ -318,11 +347,11 @@ def run_consensus_training(input_folder, output_folder,
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     print("="*70)
-    print("🌀 CONSENSUS TRAINING")
+    print("🌀 W/X/Y/Z BASIS CONSENSUS TRAINING")
     print("="*70)
     print(f"Image size: {img_size}×{img_size}")
     print(f"Latent dim: {latent_dim}")
-    print(f"Structured ratio: {structured_ratio}")
+    print(f"Structured ratio: {structured_ratio} (Pareto)")
     print(f"Consensus weight: {consensus_weight}")
     print(f"Target weight: {target_weight}")
     print(f"Epochs: {epochs}")
@@ -344,14 +373,14 @@ def run_consensus_training(input_folder, output_folder,
     train_pairs = [p for i, p in enumerate(all_pairs) if i != test_idx]
     test_pairs = [all_pairs[test_idx]]
 
-    # Create multi-rep datasets
-    print("📦 Creating datasets...")
-    train_dataset = MultiRepDataset(train_pairs, apply_augmentation=True)
-    test_dataset = MultiRepDataset(test_pairs, apply_augmentation=True)
+    # Create basis-aware datasets
+    print("📦 Creating basis-aware datasets...")
+    train_dataset = BasisDataset(train_pairs, apply_augmentation=True)
+    test_dataset = BasisDataset(test_pairs, apply_augmentation=True)
 
-    # Create hybrid batch samplers
-    train_sampler = HybridBatchSampler(train_dataset, structured_ratio=structured_ratio)
-    test_sampler = HybridBatchSampler(test_dataset, structured_ratio=0.0, shuffle=False)
+    # Create Pareto batch samplers
+    train_sampler = ParetoBatchSampler(train_dataset, structured_ratio=structured_ratio)
+    test_sampler = ParetoBatchSampler(test_dataset, structured_ratio=0.0, shuffle=False)
 
     train_loader = DataLoader(train_dataset, batch_sampler=train_sampler)
     test_loader = DataLoader(test_dataset, batch_sampler=test_sampler)
@@ -359,7 +388,7 @@ def run_consensus_training(input_folder, output_folder,
     print(f"✓ Train batches: {len(train_loader)}")
     print(f"✓ Test batches: {len(test_loader)}\n")
 
-    # Create model
+    # Create W/X/Y/Z model
     input_dim = img_size * img_size * 3
     model = DualTetrahedralNetwork(
         input_dim=input_dim,
@@ -371,7 +400,11 @@ def run_consensus_training(input_folder, output_folder,
 
     optimizer = optim.Adam(model.parameters(), lr=0.0001)
 
-    print(f"Model: {sum(p.numel() for p in model.parameters()):,} parameters\n")
+    print(f"🏗️  Model: {sum(p.numel() for p in model.parameters()):,} parameters")
+    print(f"   W: Geometric basis (4 vertices, 6 edges, 4 faces)")
+    print(f"   X: Linear tetrahedron (smooth manifolds)")
+    print(f"   Y: Nonlinear tetrahedron (boundaries)")
+    print(f"   Z: Face coupling (consensus negotiation)\n")
 
     # Train
     history = {'train': [], 'test': [], 'consensus': [], 'target': []}
@@ -380,7 +413,7 @@ def run_consensus_training(input_folder, output_folder,
     print("="*70)
 
     for epoch in range(epochs):
-        train_loss, consensus, target = train_consensus(
+        train_loss, consensus, target = train_consensus_step(
             model, train_loader, optimizer, device,
             latent_dim=latent_dim,
             consensus_weight=consensus_weight,
@@ -404,21 +437,44 @@ def run_consensus_training(input_folder, output_folder,
     print("\n✅ Training complete!\n")
 
     # Visualize
-    visualize_results(model, train_dataset, history, img_size, device)
+    visualize_basis_results(model, train_dataset, history, img_size, latent_dim, device)
 
     return model, history
 
 
-def visualize_results(model, train_dataset, history, img_size, device):
-    """Visualize training results."""
+# ============================================================================
+# VISUALIZATION
+# ============================================================================
+
+def visualize_basis_results(model, train_dataset, history, img_size, latent_dim, device):
+    """Visualize results showing X/Y perspectives."""
     model.eval()
 
-    # Get a sample from base pairs
+    # Get sample
     sample_x, sample_y = train_dataset.base_pairs[0]
     sample_x_tensor = sample_x.reshape(1, -1).to(device)
 
     with torch.no_grad():
-        output = model(sample_x_tensor).cpu()
+        # Get separate X and Y perspectives
+        lin_v, _ = model.linear_net(sample_x_tensor, return_faces=True)
+        non_v, _ = model.nonlinear_net(sample_x_tensor, return_faces=True)
+
+        # X perspective output
+        lin_only = torch.cat([
+            lin_v.reshape(1, -1),
+            torch.zeros(1, latent_dim * 4, device=device)
+        ], dim=-1)
+        x_output = model.output_projection(lin_only).cpu()
+
+        # Y perspective output
+        non_only = torch.cat([
+            torch.zeros(1, latent_dim * 4, device=device),
+            non_v.reshape(1, -1)
+        ], dim=-1)
+        y_output = model.output_projection(non_only).cpu()
+
+        # Combined consensus output
+        consensus_output = model(sample_x_tensor).cpu()
 
     # Reshape to images
     def to_img(t):
@@ -426,11 +482,14 @@ def visualize_results(model, train_dataset, history, img_size, device):
 
     input_img = to_img(sample_x)
     target_img = to_img(sample_y)
-    output_img = to_img(output)
+    x_img = to_img(x_output)
+    y_img = to_img(y_output)
+    consensus_img = to_img(consensus_output)
 
     # Plot
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
 
+    # Top row
     axes[0, 0].imshow(input_img)
     axes[0, 0].set_title('Input', fontsize=14, fontweight='bold')
     axes[0, 0].axis('off')
@@ -439,23 +498,37 @@ def visualize_results(model, train_dataset, history, img_size, device):
     axes[0, 1].set_title('Target', fontsize=14, fontweight='bold')
     axes[0, 1].axis('off')
 
-    axes[1, 0].imshow(output_img)
-    axes[1, 0].set_title('Consensus Output', fontsize=14, fontweight='bold', color='blue')
+    axes[0, 2].imshow(consensus_img)
+    axes[0, 2].set_title('Consensus Output\n(Z-Coupled)',
+                        fontsize=14, fontweight='bold', color='blue')
+    axes[0, 2].axis('off')
+
+    # Bottom row
+    axes[1, 0].imshow(x_img)
+    axes[1, 0].set_title('X Perspective\n(Linear/Smooth)',
+                        fontsize=13, fontweight='bold', color='green')
     axes[1, 0].axis('off')
 
+    axes[1, 1].imshow(y_img)
+    axes[1, 1].set_title('Y Perspective\n(Nonlinear/Boundary)',
+                        fontsize=13, fontweight='bold', color='red')
+    axes[1, 1].axis('off')
+
     # Training curves
-    axes[1, 1].plot(history['test'], label='Test Loss', linewidth=2, color='blue')
-    axes[1, 1].plot(history['consensus'], label='Consensus', linewidth=2, color='purple', alpha=0.7)
-    axes[1, 1].plot(history['target'], label='Target', linewidth=2, color='orange', alpha=0.7)
-    axes[1, 1].set_title('Training Curves', fontsize=14, fontweight='bold')
-    axes[1, 1].set_xlabel('Epoch')
-    axes[1, 1].set_ylabel('Loss')
-    axes[1, 1].legend()
-    axes[1, 1].grid(alpha=0.3)
+    axes[1, 2].plot(history['test'], label='Test Loss', linewidth=2, color='blue')
+    axes[1, 2].plot(history['consensus'], label='Consensus (X↔Y)',
+                   linewidth=2, color='purple', alpha=0.7)
+    axes[1, 2].plot(history['target'], label='Target Guidance',
+                   linewidth=2, color='orange', alpha=0.7)
+    axes[1, 2].set_title('Training Dynamics', fontsize=14, fontweight='bold')
+    axes[1, 2].set_xlabel('Epoch')
+    axes[1, 2].set_ylabel('Loss')
+    axes[1, 2].legend()
+    axes[1, 2].grid(alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig('consensus_only_results.png', dpi=150, bbox_inches='tight')
-    print("✓ Saved visualization to 'consensus_only_results.png'\n")
+    plt.savefig('consensus_basis_results.png', dpi=150, bbox_inches='tight')
+    print("✓ Saved visualization to 'consensus_basis_results.png'\n")
     plt.show()
 
     # Print stats
@@ -465,6 +538,13 @@ def visualize_results(model, train_dataset, history, img_size, device):
     print(f"Test Loss:       {history['test'][-1]:.6f}")
     print(f"Consensus Loss:  {history['consensus'][-1]:.6f}")
     print(f"Target Loss:     {history['target'][-1]:.6f}")
+    print(f"\nConsensus reduction: {history['consensus'][0]:.6f} → {history['consensus'][-1]:.6f}")
+    print(f"Target reduction:    {history['target'][0]:.6f} → {history['target'][-1]:.6f}")
+    print("="*70)
+    print("\n💡 Interpretation:")
+    print("  • Consensus ↓ = X and Y perspectives converging")
+    print("  • Target ↓ = Both perspectives approaching ground truth")
+    print("  • Low consensus = Geometric coherence achieved!")
     print("="*70)
 
 
@@ -474,14 +554,14 @@ def visualize_results(model, train_dataset, history, img_size, device):
 
 if __name__ == "__main__":
     # Example usage
-    model, history = run_consensus_training(
+    model, history = run_basis_consensus(
         input_folder="/path/to/input/images",
         output_folder="/path/to/output/images",
         img_size=128,
         latent_dim=128,
-        epochs=100,
+        epochs=300,
         test_idx=6,
-        structured_ratio=0.5,  # 50% structured, 50% random batches
-        consensus_weight=0.6,
-        target_weight=0.4
+        structured_ratio=0.2,  # Pareto-optimal (20% structured, 80% random)
+        consensus_weight=0.65,  # Agreement > matching
+        target_weight=0.35
     )
