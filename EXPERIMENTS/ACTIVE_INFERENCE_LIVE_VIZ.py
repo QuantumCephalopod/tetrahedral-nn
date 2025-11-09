@@ -87,6 +87,7 @@ def visualize_world_model_live(
         trainer.buffer.add(frame, action, next_frame)
 
         # Train on batch
+        metrics = None  # Initialize to avoid UnboundLocalError
         if len(trainer.buffer) >= trainer.batch_size:
             metrics = trainer.train_step()
 
