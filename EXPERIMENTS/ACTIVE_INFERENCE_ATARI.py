@@ -417,6 +417,58 @@ class BlendedLossScheduler:
 
 
 # ============================================================================
+# FREE ENERGY SCHEDULER (Exploration vs Exploitation)
+# ============================================================================
+
+class FreeEnergyScheduler:
+    """
+    Schedule exploration bonus (entropy term) during training.
+
+    Free Energy = Prediction Error - β × Entropy
+
+    Philosophy:
+      - High β: Explore! Maintain diverse beliefs (curious)
+      - Low β: Exploit! Collapse to best predictions (confident)
+
+    Curriculum:
+      - Phase 1 (Control): High exploration (learn what buttons do)
+      - Phase 2 (Interaction): Medium exploration (discover ball physics)
+      - Phase 3+: Low exploration (refine world model)
+    """
+
+    def __init__(self,
+                 control_beta=0.1,      # Phase 1: Maximum curiosity
+                 interaction_beta=0.05,  # Phase 2: Moderate exploration
+                 final_beta=0.01):       # Phase 3+: Minimal exploration
+        self.control_beta = control_beta
+        self.interaction_beta = interaction_beta
+        self.final_beta = final_beta
+
+    def get_beta(self, step, curriculum_scheduler):
+        """
+        Get exploration coefficient based on curriculum phase.
+
+        Args:
+            step: Current training step
+            curriculum_scheduler: AttentionCurriculumScheduler instance
+
+        Returns:
+            β (exploration weight)
+        """
+        phase_name = curriculum_scheduler.get_phase_name(step)
+
+        if step < curriculum_scheduler.control_steps:
+            # Phase 1: Maximum exploration
+            return self.control_beta
+        elif step < curriculum_scheduler.interaction_steps:
+            # Phase 2: Moderate exploration
+            return self.interaction_beta
+        else:
+            # Phase 3+: Refined exploitation
+            return self.final_beta
+
+
+# ============================================================================
 # ACTIVE INFERENCE TRAINER
 # ============================================================================
 
@@ -525,13 +577,17 @@ class ActiveInferenceTrainer:
         # Attention curriculum (developmental learning!)
         self.attention_curriculum = AttentionCurriculumScheduler()
 
+        # Free energy scheduler (exploration!)
+        self.free_energy_scheduler = FreeEnergyScheduler()
+
         # Metrics
         self.step_count = 0
         self.episode_count = 0
         self.history = {
             'mse': [], 'ssim': [], 'total': [],
             'mse_weight': [], 'ssim_weight': [],
-            'mask_amount': [], 'phase': []
+            'mask_amount': [], 'phase': [],
+            'entropy': [], 'beta': []
         }
 
     def collect_experience(self, n_steps=100):
@@ -611,21 +667,40 @@ class ActiveInferenceTrainer:
             target = apply_attention_mask(next_frames, mask_amount, player='right')
             prediction = pred_next_frames
 
-        # === BLENDED LOSS ===
+        # === BLENDED LOSS (Prediction Error) ===
         mse_weight, ssim_weight = self.loss_scheduler.get_weights(self.step_count)
 
         mse = F.mse_loss(prediction, target)
 
         if ssim_weight > 0:
             ssim = ssim_loss(prediction, target)
-            loss = mse_weight * mse + ssim_weight * ssim
+            prediction_error = mse_weight * mse + ssim_weight * ssim
         else:
             ssim = torch.tensor(0.0)
-            loss = mse
+            prediction_error = mse
 
-        # Backprop
+        # === FREE ENERGY (Prediction Error - β × Entropy) ===
+        # Entropy = variance of predictions (how uncertain/diverse are beliefs?)
+        # High entropy = model is uncertain = good for exploration!
+        # Low entropy = model is confident = collapse to single prediction
+
+        beta = self.free_energy_scheduler.get_beta(self.step_count, self.attention_curriculum)
+
+        # Compute prediction entropy (variance across spatial dimensions)
+        # High variance = diverse/uncertain predictions = exploring
+        # Low variance = uniform predictions = boring/collapsed
+        pred_variance = torch.var(prediction)
+        entropy = pred_variance  # Simple entropy measure
+
+        # Free Energy = Prediction Error - Entropy Bonus
+        # Minimizing this encourages:
+        #   1. Low prediction error (accuracy)
+        #   2. High entropy (diversity/exploration)
+        free_energy = prediction_error - beta * entropy
+
+        # Backprop on FREE ENERGY (not just prediction error!)
         self.optimizer.zero_grad()
-        loss.backward()
+        free_energy.backward()
         self.optimizer.step()
 
         self.step_count += 1
@@ -634,7 +709,10 @@ class ActiveInferenceTrainer:
         metrics = {
             'mse': mse.item(),
             'ssim': ssim.item() if ssim_weight > 0 else 0.0,
-            'total': loss.item(),
+            'prediction_error': prediction_error.item(),
+            'entropy': entropy.item(),
+            'beta': beta,
+            'total': free_energy.item(),  # This is the actual loss being minimized
             'mse_weight': mse_weight,
             'ssim_weight': ssim_weight,
             'mask_amount': mask_amount,
@@ -682,6 +760,8 @@ class ActiveInferenceTrainer:
                     self.history['ssim_weight'].append(metrics['ssim_weight'])
                     self.history['mask_amount'].append(metrics['mask_amount'])
                     self.history['phase'].append(metrics['phase'])
+                    self.history['entropy'].append(metrics['entropy'])
+                    self.history['beta'].append(metrics['beta'])
 
             # Log
             avg_mse = np.mean(episode_metrics['mse']) if episode_metrics['mse'] else 0
@@ -692,6 +772,8 @@ class ActiveInferenceTrainer:
             current_phase = metrics['phase'] if metrics else 'Initializing'
             current_mask = metrics['mask_amount'] if metrics else 0.0
             is_difference = metrics.get('difference_mode', False) if metrics else False
+            current_beta = metrics.get('beta', 0.0) if metrics else 0.0
+            current_entropy = metrics.get('entropy', 0.0) if metrics else 0.0
 
             print(f"\n📊 Episode {episode+1}/{n_episodes}")
             print(f"   Total episodes seen: {self.episode_count}")
@@ -699,9 +781,10 @@ class ActiveInferenceTrainer:
             print(f"   🌱 Curriculum: {current_phase}")
             print(f"   👁️  Attention mask: {current_mask*100:.1f}% (0%=full view)")
             print(f"   🔄 Mode: {'Difference' if is_difference else 'State'} prediction")
+            print(f"   🎲 Exploration: β={current_beta:.3f}, Entropy={current_entropy:.6f}")
             print(f"   Loss (MSE): {avg_mse:.6f}")
             print(f"   Loss (SSIM): {avg_ssim:.6f}")
-            print(f"   Loss (Total): {avg_total:.6f}")
+            print(f"   Loss (Free Energy): {avg_total:.6f}")
             print(f"   Buffer size: {len(self.buffer)}")
 
         print("\n✅ Training complete!\n")
