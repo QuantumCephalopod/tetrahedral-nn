@@ -57,9 +57,22 @@ class DualTetrahedralNetwork(nn.Module):
         self.coupling_strength = coupling_strength
         self.output_mode = output_mode
 
-        # === TEMPORAL FIELD (What persists across frames) ===
-        self.temporal_field = None  # Initialized on first forward pass
-        self.field_decay = 0.1  # How much new info vs old context
+        # === MULTI-TIMESCALE MEMORY (Golden Ratio Hierarchy) ===
+        # Memory at three timescales, matching morphogenetic levels
+        # φ = golden ratio ≈ 1.618034 (most irrational number, prevents resonance)
+        PHI = 1.618034
+        base_decay = 0.1
+
+        self.fast_field = None      # Vertex-level: immediate activity (~10 frames)
+        self.medium_field = None    # Edge-level: relational patterns (~16 frames)
+        self.slow_field = None      # Face-level: contextual structure (~26 frames)
+        # Coupling params = permanent hubs (learned with tiny LR)
+
+        self.fast_decay = base_decay              # 0.1
+        self.medium_decay = base_decay / PHI      # 0.0618
+        self.slow_decay = base_decay / (PHI**2)   # 0.0382
+
+        # Power-law-like memory: combination of 3 exponentials ≈ 1/t^α
 
         # === LINEAR TETRAHEDRON (Left Hemisphere) ===
         self.linear_net = LinearTetrahedron(
@@ -129,20 +142,32 @@ class DualTetrahedralNetwork(nn.Module):
         # nonlinear_faces: (batch, 4, latent_dim)
 
         # ====================================================================
-        # STEP 1.5: UPDATE TEMPORAL FIELD (What persists?)
+        # STEP 1.5: UPDATE MULTI-TIMESCALE MEMORY (What persists?)
         # ====================================================================
-        # The field is an exponential moving average of vertex states
-        # This is what the network "remembers" across frames
-        current_state = linear_vertices.detach()  # Use linear (smooth) vertices
+        # Three memory fields at golden ratio timescales
+        # Together they approximate power-law decay (never fully forgets!)
+        current_vertices = linear_vertices.detach()  # Smooth vertices as memory
+        current_edges = linear_faces.detach()        # Edge patterns
 
-        if self.temporal_field is None:
-            # First frame: initialize field
-            self.temporal_field = current_state
+        # Initialize on first forward pass
+        if self.fast_field is None:
+            self.fast_field = current_vertices
+            self.medium_field = current_vertices
+            self.slow_field = current_vertices
         else:
-            # Subsequent frames: blend new + old
-            # α controls how much new info vs context
-            self.temporal_field = (self.field_decay * current_state +
-                                  (1 - self.field_decay) * self.temporal_field)
+            # Update each field at different rates (golden ratio hierarchy)
+            self.fast_field = (self.fast_decay * current_vertices +
+                              (1 - self.fast_decay) * self.fast_field)
+
+            self.medium_field = (self.medium_decay * current_vertices +
+                                (1 - self.medium_decay) * self.medium_field)
+
+            self.slow_field = (self.slow_decay * current_vertices +
+                              (1 - self.slow_decay) * self.slow_field)
+
+        # Combined memory = weighted sum of all timescales (power law emerges!)
+        # Recent dominates, but deep past never fully disappears
+        temporal_context = (self.fast_field + self.medium_field + self.slow_field) / 3
 
         # ====================================================================
         # STEP 2: INTER-FACE COUPLING

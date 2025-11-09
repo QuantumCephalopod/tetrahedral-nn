@@ -17,6 +17,7 @@ Philosophy:
   - Nested timescales: Field (coupling) stable, activity (vertices) reactive
   - Self-organization: No pre-assignment of roles
   - Active inference: The loss landscape defines what "matters"
+  - Golden ratio (φ): Natural timescale separation, prevents resonance artifacts
 
 Author: Philipp Remy Bartholomäus
 Date: November 9, 2025
@@ -464,39 +465,51 @@ def evaluate(model, loader, device, img_size=128):
 def run_nested_training(input_folder, output_folder,
                        img_size=128, latent_dim=128,
                        epochs=300, test_idx=6,
-                       structured_ratio=0.2,
+                       structured_ratio=None,  # Default: φ-based (0.382)
                        diffusion_steps=10,
                        bootstrap_epochs=30,
                        base_lr=0.0001,
-                       timescale_factor=2.0,
+                       timescale_factor=None,  # Default: φ (golden ratio)
                        load_checkpoint_path: Optional[str] = None,
                        device=None):
     """
     Run nested timescale training with blended MSE→SSIM.
 
     Args:
-        timescale_factor: Learning rate divisor for hierarchy (e.g., 2.0 means each level is 2× slower)
+        timescale_factor: Learning rate divisor for hierarchy (φ ≈ 1.618 = golden ratio)
+        structured_ratio: Pareto batching ratio (1/(1+φ) ≈ 0.382 = natural split)
     """
+    # Golden ratio constants
+    PHI = 1.618034
+    if timescale_factor is None:
+        timescale_factor = PHI
+    if structured_ratio is None:
+        structured_ratio = 1.0 / (1.0 + PHI)  # ≈ 0.382
     if device is None:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     print("="*70)
-    print("🌀 TRAINING_10: NESTED TIMESCALES + BLENDED LOSS")
+    print("🌀 TRAINING_10: NESTED TIMESCALES + BLENDED LOSS (φ-based)")
     print("="*70)
     print(f"Image size: {img_size}×{img_size}")
     print(f"Latent dim: {latent_dim}")
-    print(f"Structured ratio: {structured_ratio} (Pareto)")
+    print(f"Structured ratio: {structured_ratio:.3f} (Golden ratio Pareto: 1/(1+φ))")
     print(f"Diffusion steps: {diffusion_steps}")
     print(f"Bootstrap epochs: {bootstrap_epochs} (pure MSE)")
     print(f"Total epochs: {epochs}")
     print(f"Base LR: {base_lr}")
-    print(f"Timescale factor: {timescale_factor}")
+    print(f"Timescale factor: φ = {timescale_factor:.6f} (golden ratio)")
     print(f"Device: {device}")
-    print("\n🧠 Nested Timescales (Morphogenetic Order):")
+    print("\n🧠 Nested Timescales (Golden Ratio Hierarchy):")
     print(f"  Vertices:   LR = {base_lr:.6f} (fast/reactive)")
     print(f"  Edges:      LR = {base_lr/timescale_factor:.6f} (medium)")
     print(f"  Faces:      LR = {base_lr/(timescale_factor**2):.6f} (slow)")
-    print(f"  Coupling:   LR = {base_lr/(timescale_factor**3):.6f} (slowest/field)")
+    print(f"  Coupling:   LR = {base_lr/(timescale_factor**3):.6f} (slowest/permanent hubs)")
+    print(f"\n💫 Multi-Timescale Memory (Power-Law):")
+    print(f"  Fast field:   decay = {0.1:.4f} (~10 frames, vertex-level)")
+    print(f"  Medium field: decay = {0.1/timescale_factor:.4f} (~16 frames, edge-level)")
+    print(f"  Slow field:   decay = {0.1/(timescale_factor**2):.4f} (~26 frames, face-level)")
+    print(f"  Hub memory:   Learned parameters (never decays!)")
     print("\n📊 Blended Loss Schedule:")
     print(f"  Epoch 0-{bootstrap_epochs}: 100% MSE, 0% SSIM (bootstrap)")
     print(f"  Epoch {bootstrap_epochs}-{epochs}: 100%→20% MSE, 0%→80% SSIM (blend)")
@@ -733,10 +746,10 @@ if __name__ == "__main__":
         latent_dim=128,
         epochs=300,
         test_idx=6,
-        structured_ratio=0.2,      # Pareto batching
+        structured_ratio=None,      # Default: φ-based (≈0.382)
         diffusion_steps=10,
         bootstrap_epochs=30,        # Pure MSE for 30 epochs
         base_lr=0.0001,
-        timescale_factor=2.0,      # Each level 2× slower
+        timescale_factor=None,      # Default: φ (golden ratio ≈1.618)
         load_checkpoint_path=None   # Or path to continue training
     )
