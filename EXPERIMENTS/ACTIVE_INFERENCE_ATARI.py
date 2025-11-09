@@ -316,9 +316,14 @@ class ActiveInferenceTrainer:
         base_lr=0.0001,
         buffer_capacity=10000,
         batch_size=16,
-        device='cuda'
+        device=None
     ):
-        self.device = device
+        # Auto-detect device
+        if device is None:
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        else:
+            self.device = device
+        print(f"🖥️  Device: {self.device}")
         self.img_size = img_size
         self.batch_size = batch_size
 
