@@ -40,8 +40,6 @@ from pathlib import Path
 import cv2
 import random
 import math
-from skimage.metrics import structural_similarity as ssim
-from scipy.ndimage import zoom
 
 # Assumes DualTetrahedralNetwork is already imported
 # If not: from Z_COUPLING.Z_interface_coupling import DualTetrahedralNetwork
@@ -265,48 +263,76 @@ class ConsensusScheduler:
 # DIFFUSION CONSENSUS TRAINING
 # ============================================================================
 
-def ssim_loss(pred, target, img_size):
+def ssim_loss(pred, target, img_size, window_size=11):
     """
-    SSIM-based loss function.
+    Differentiable SSIM-based loss function (PyTorch implementation).
 
     SSIM = Structural Similarity Index Measure
     - Measures perceptual similarity (not just pixel difference)
     - Range: [-1, 1] where 1 = perfect match
     - We return (1 - SSIM) to use as a loss (minimize)
 
+    This is a DIFFERENTIABLE implementation using PyTorch ops for backprop!
+
     Args:
         pred: Predicted tensor (batch, flattened)
         target: Target tensor (batch, flattened)
         img_size: Image dimension (assumes square, 3 channels)
+        window_size: Size of Gaussian window (default 11)
 
     Returns:
-        Loss value (lower = more similar)
+        Loss tensor (lower = more similar)
     """
     bs = pred.size(0)
 
-    # Reshape to images
+    # Reshape to images (B, C, H, W)
     pred_img = pred.reshape(bs, 3, img_size, img_size)
     target_img = target.reshape(bs, 3, img_size, img_size)
 
-    # Compute SSIM for each sample in batch
-    ssim_vals = []
-    for i in range(bs):
-        # Convert to numpy (HWC format)
-        pred_np = pred_img[i].permute(1, 2, 0).detach().cpu().numpy()
-        target_np = target_img[i].permute(1, 2, 0).detach().cpu().numpy()
+    # Constants for stability
+    C1 = (0.01) ** 2
+    C2 = (0.03) ** 2
 
-        # Compute SSIM (channel_axis=2 for RGB)
-        ssim_val = ssim(pred_np, target_np,
-                       data_range=1.0,
-                       channel_axis=2,
-                       multichannel=True)
-        ssim_vals.append(ssim_val)
+    # Create Gaussian window
+    def gaussian_window(size, sigma=1.5):
+        coords = torch.arange(size, dtype=torch.float32)
+        coords -= size // 2
+        g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
+        g /= g.sum()
+        return g.unsqueeze(0) * g.unsqueeze(1)
 
-    # Average SSIM across batch
-    mean_ssim = sum(ssim_vals) / len(ssim_vals)
+    window = gaussian_window(window_size).to(pred_img.device)
+    window = window.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
 
-    # Return as loss (1 - SSIM, so we minimize dissimilarity)
-    return 1.0 - mean_ssim
+    # Apply Gaussian filter to each channel
+    def apply_filter(img, window):
+        # img: (B, C, H, W)
+        # window: (1, 1, K, K)
+        C = img.size(1)
+        # Expand window for each channel
+        _window = window.expand(C, 1, -1, -1)
+        return F.conv2d(img, _window, padding=window_size // 2, groups=C)
+
+    mu1 = apply_filter(pred_img, window)
+    mu2 = apply_filter(target_img, window)
+
+    mu1_sq = mu1 ** 2
+    mu2_sq = mu2 ** 2
+    mu1_mu2 = mu1 * mu2
+
+    sigma1_sq = apply_filter(pred_img ** 2, window) - mu1_sq
+    sigma2_sq = apply_filter(target_img ** 2, window) - mu2_sq
+    sigma12 = apply_filter(pred_img * target_img, window) - mu1_mu2
+
+    # SSIM formula
+    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / \
+               ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+
+    # Average over spatial dimensions and channels
+    ssim_val = ssim_map.mean()
+
+    # Return as loss (1 - SSIM)
+    return 1.0 - ssim_val
 
 
 def train_diffusion_consensus(model, loader, optimizer, device,
