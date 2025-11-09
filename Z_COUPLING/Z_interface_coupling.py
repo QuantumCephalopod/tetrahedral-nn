@@ -57,6 +57,10 @@ class DualTetrahedralNetwork(nn.Module):
         self.coupling_strength = coupling_strength
         self.output_mode = output_mode
 
+        # === TEMPORAL FIELD (What persists across frames) ===
+        self.temporal_field = None  # Initialized on first forward pass
+        self.field_decay = 0.1  # How much new info vs old context
+
         # === LINEAR TETRAHEDRON (Left Hemisphere) ===
         self.linear_net = LinearTetrahedron(
             input_dim=input_dim,
@@ -123,6 +127,22 @@ class DualTetrahedralNetwork(nn.Module):
         nonlinear_vertices, nonlinear_faces = self.nonlinear_net(x, return_faces=True)
         # nonlinear_vertices: (batch, 4, latent_dim)
         # nonlinear_faces: (batch, 4, latent_dim)
+
+        # ====================================================================
+        # STEP 1.5: UPDATE TEMPORAL FIELD (What persists?)
+        # ====================================================================
+        # The field is an exponential moving average of vertex states
+        # This is what the network "remembers" across frames
+        current_state = linear_vertices.detach()  # Use linear (smooth) vertices
+
+        if self.temporal_field is None:
+            # First frame: initialize field
+            self.temporal_field = current_state
+        else:
+            # Subsequent frames: blend new + old
+            # α controls how much new info vs context
+            self.temporal_field = (self.field_decay * current_state +
+                                  (1 - self.field_decay) * self.temporal_field)
 
         # ====================================================================
         # STEP 2: INTER-FACE COUPLING

@@ -10,10 +10,13 @@ Unified training combining all discoveries:
   5. Checkpoint saving for continual learning
 
 Philosophy:
+  "What is worth predicting?"
+
   - MSE bootstraps structure (can't learn from pure noise with SSIM)
   - SSIM refines perceptual quality once structure exists
   - Nested timescales: Field (coupling) stable, activity (vertices) reactive
   - Self-organization: No pre-assignment of roles
+  - Active inference: The loss landscape defines what "matters"
 
 Author: Philipp Remy Bartholomäus
 Date: November 9, 2025
