@@ -7,6 +7,7 @@ Combines:
   - Consensus negotiation (X ↔ Y perspectives)
   - Diffusion-style iterative refinement
   - Pareto batching (20% structured)
+  - **SSIM loss** (structural similarity instead of pixel-wise MSE)
 
 Key Innovation:
   Instead of one-shot prediction, X and Y negotiate over T timesteps:
@@ -15,6 +16,10 @@ Key Innovation:
   Annealed weighting:
     Early steps: 80% consensus, 20% target (build agreement)
     Late steps:  40% consensus, 60% target (refine accuracy)
+
+  SSIM Loss:
+    Optimizes for PERCEPTUAL similarity (luminance, contrast, structure)
+    instead of raw pixel differences. Better for image quality!
 
 Philosophy:
   "Reality emerges through PROCESS of negotiation, not instant decision."
@@ -260,16 +265,60 @@ class ConsensusScheduler:
 # DIFFUSION CONSENSUS TRAINING
 # ============================================================================
 
-def train_diffusion_consensus(model, loader, optimizer, device,
-                              latent_dim=128, scheduler=None):
+def ssim_loss(pred, target, img_size):
     """
-    Train with diffusion-based consensus.
+    SSIM-based loss function.
+
+    SSIM = Structural Similarity Index Measure
+    - Measures perceptual similarity (not just pixel difference)
+    - Range: [-1, 1] where 1 = perfect match
+    - We return (1 - SSIM) to use as a loss (minimize)
+
+    Args:
+        pred: Predicted tensor (batch, flattened)
+        target: Target tensor (batch, flattened)
+        img_size: Image dimension (assumes square, 3 channels)
+
+    Returns:
+        Loss value (lower = more similar)
+    """
+    bs = pred.size(0)
+
+    # Reshape to images
+    pred_img = pred.reshape(bs, 3, img_size, img_size)
+    target_img = target.reshape(bs, 3, img_size, img_size)
+
+    # Compute SSIM for each sample in batch
+    ssim_vals = []
+    for i in range(bs):
+        # Convert to numpy (HWC format)
+        pred_np = pred_img[i].permute(1, 2, 0).detach().cpu().numpy()
+        target_np = target_img[i].permute(1, 2, 0).detach().cpu().numpy()
+
+        # Compute SSIM (channel_axis=2 for RGB)
+        ssim_val = ssim(pred_np, target_np,
+                       data_range=1.0,
+                       channel_axis=2,
+                       multichannel=True)
+        ssim_vals.append(ssim_val)
+
+    # Average SSIM across batch
+    mean_ssim = sum(ssim_vals) / len(ssim_vals)
+
+    # Return as loss (1 - SSIM, so we minimize dissimilarity)
+    return 1.0 - mean_ssim
+
+
+def train_diffusion_consensus(model, loader, optimizer, device,
+                              latent_dim=128, scheduler=None, img_size=128):
+    """
+    Train with diffusion-based consensus using SSIM loss.
 
     For each batch:
         1. Get target output
         2. Add noise at random timestep t
         3. X and Y denoise with consensus at timestep t
-        4. Loss = weighted consensus + target
+        4. Loss = weighted consensus + target (using SSIM!)
         5. Weights annealed based on t
     """
     if scheduler is None:
@@ -328,17 +377,17 @@ def train_diffusion_consensus(model, loader, optimizer, device,
         linear_output = model.output_projection(lin_vertices_only)
         nonlinear_output = model.output_projection(non_vertices_only)
 
-        # === Annealed loss ===
+        # === Annealed loss with SSIM ===
         # Get weights based on average timestep in batch
         avg_t = t.mean().item()
         consensus_weight, target_weight = scheduler.get_weights(avg_t)
 
-        # Consensus: X and Y must agree
-        consensus_loss = F.mse_loss(linear_output, nonlinear_output)
+        # Consensus: X and Y must agree (SSIM-based)
+        consensus_loss = ssim_loss(linear_output, nonlinear_output, img_size)
 
-        # Target: Denoise toward clean output
-        target_loss = (F.mse_loss(linear_output, batch_y) +
-                      F.mse_loss(nonlinear_output, batch_y)) / 2
+        # Target: Denoise toward clean output (SSIM-based)
+        target_loss = (ssim_loss(linear_output, batch_y, img_size) +
+                      ssim_loss(nonlinear_output, batch_y, img_size)) / 2
 
         loss = consensus_weight * consensus_loss + target_weight * target_loss
 
@@ -353,8 +402,8 @@ def train_diffusion_consensus(model, loader, optimizer, device,
     return total_loss / n, total_consensus / n, total_target / n
 
 
-def evaluate(model, loader, device):
-    """Evaluate with direct prediction (no diffusion at test time yet)."""
+def evaluate(model, loader, device, img_size=128):
+    """Evaluate with direct prediction using SSIM."""
     model.eval()
     total_loss = 0.0
 
@@ -365,7 +414,7 @@ def evaluate(model, loader, device):
             batch_y = batch_y.to(device)
 
             output = model(batch_x)
-            total_loss += F.mse_loss(output, batch_y).item()
+            total_loss += ssim_loss(output, batch_y, img_size)
 
     return total_loss / len(loader)
 
@@ -519,10 +568,11 @@ def run_diffusion_consensus(input_folder, output_folder,
         train_loss, consensus, target = train_diffusion_consensus(
             model, train_loader, optimizer, device,
             latent_dim=latent_dim,
-            scheduler=scheduler
+            scheduler=scheduler,
+            img_size=img_size
         )
 
-        test_loss = evaluate(model, test_loader, device)
+        test_loss = evaluate(model, test_loader, device, img_size=img_size)
 
         history['train'].append(train_loss)
         history['test'].append(test_loss)
