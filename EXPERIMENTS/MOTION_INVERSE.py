@@ -480,6 +480,102 @@ class FixedTrainer:
         print("✅ Saved: training_progress.png")
         plt.show()
 
+    def diagnose_what_model_sees(self, n_samples=4):
+        """
+        Show EXACTLY what the model sees and does.
+
+        This will reveal if states are actually different or collapsing.
+        """
+        import seaborn as sns
+        action_names = ['NOOP', 'FIRE', 'RIGHT', 'LEFT', 'RIGHTFIRE', 'LEFTFIRE']
+
+        self.model.eval()
+        frames_t, actions, frames_t1 = self.buffer.sample(n_samples)
+        frames_t = frames_t.to(self.device)
+        frames_t1 = frames_t1.to(self.device)
+        actions = actions.to(self.device)
+
+        with torch.no_grad():
+            state_t = self.model.encode_state(frames_t)
+            state_t1 = self.model.encode_state(frames_t1)
+            logits = self.model.inverse_model(state_t, state_t1)
+            pred_actions = torch.argmax(logits, dim=-1)
+            probs = torch.softmax(logits, dim=-1)
+
+        # Create figure
+        fig = plt.figure(figsize=(18, n_samples * 4))
+
+        for i in range(n_samples):
+            # Frames
+            ax1 = plt.subplot(n_samples, 5, i*5 + 1)
+            ax1.imshow(frames_t[i].cpu().permute(1, 2, 0).numpy())
+            ax1.set_title(f'Frame t', fontsize=10)
+            ax1.axis('off')
+
+            ax2 = plt.subplot(n_samples, 5, i*5 + 2)
+            ax2.imshow(frames_t1[i].cpu().permute(1, 2, 0).numpy())
+            ax2.set_title(f'Frame t+1', fontsize=10)
+            ax2.axis('off')
+
+            # State representations
+            ax3 = plt.subplot(n_samples, 5, i*5 + 3)
+            state_vis = state_t[i].cpu().numpy().reshape(16, 8)
+            im3 = ax3.imshow(state_vis, cmap='viridis', aspect='auto')
+            ax3.set_title(f'State t', fontsize=10)
+            ax3.axis('off')
+            plt.colorbar(im3, ax=ax3, fraction=0.046)
+
+            ax4 = plt.subplot(n_samples, 5, i*5 + 4)
+            state_vis2 = state_t1[i].cpu().numpy().reshape(16, 8)
+            im4 = ax4.imshow(state_vis2, cmap='viridis', aspect='auto')
+            ax4.set_title(f'State t+1', fontsize=10)
+            ax4.axis('off')
+            plt.colorbar(im4, ax=ax4, fraction=0.046)
+
+            # Inverse prediction
+            ax5 = plt.subplot(n_samples, 5, i*5 + 5)
+            true_action = actions[i].item()
+            pred_action = pred_actions[i].item()
+
+            bars = ax5.bar(range(6), probs[i].cpu().numpy())
+            bars[true_action].set_color('green')
+            bars[pred_action].set_color('red' if pred_action != true_action else 'green')
+            ax5.set_xticks(range(6))
+            ax5.set_xticklabels(action_names, rotation=45, ha='right', fontsize=8)
+            ax5.set_ylim([0, 1])
+            ax5.set_title(f'True: {action_names[true_action]}\nPred: {action_names[pred_action]}',
+                         fontsize=10, color='green' if pred_action == true_action else 'red')
+            ax5.axhline(1/6, color='gray', linestyle='--', alpha=0.5)
+
+        plt.tight_layout()
+        plt.savefig('diagnosis.png', dpi=150, bbox_inches='tight')
+        print("✅ Saved: diagnosis.png")
+        plt.show()
+
+        # State analysis
+        print("\n" + "="*70)
+        print("📊 STATE ANALYSIS")
+        print("="*70)
+
+        state_diff = (state_t1 - state_t).cpu().numpy()
+        print(f"\nState magnitude:")
+        print(f"  state_t:  mean={state_t.mean().item():.4f}, std={state_t.std().item():.4f}")
+        print(f"  state_t1: mean={state_t1.mean().item():.4f}, std={state_t1.std().item():.4f}")
+        print(f"\nState change (t1 - t):")
+        print(f"  mean={state_diff.mean():.6f}, std={state_diff.std():.6f}")
+
+        if abs(state_diff.mean()) < 0.001 and state_diff.std() < 0.01:
+            print("  ⚠️  WARNING: States barely change!")
+
+        state_similarity = F.cosine_similarity(state_t, state_t1, dim=1).cpu().numpy()
+        print(f"\nCosine similarity (1.0 = identical):")
+        print(f"  mean={state_similarity.mean():.4f}")
+        if state_similarity.mean() > 0.99:
+            print("  ⚠️  WARNING: States >99% similar - collapsing!")
+
+        self.model.train()
+        print("="*70)
+
     def show_confusion_matrix(self, n_samples=100):
         """Show confusion matrix for inverse model"""
         import seaborn as sns
