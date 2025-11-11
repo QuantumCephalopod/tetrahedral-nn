@@ -10,11 +10,11 @@
 EXPERIMENTS/
 ├── README.md  ← You are here (navigation hub)
 │
-├── 🌀 ACTIVE_INFERENCE_ATARI.py          [CURRENT WORK]
-├── 🌀 ACTIVE_INFERENCE_LIVE_VIZ.py       [CURRENT WORK]
+├── 📁 ACTIVE_INFERENCE/                  [CURRENT WORK]
+│   ├── ACTIVE_INFERENCE_ATARI.py        🌀 Main trainer
+│   └── ACTIVE_INFERENCE_LIVE_VIZ.py     🌀 Live visualization
 │
 ├── 📁 CONSENSUS_EXPERIMENTS/
-│   ├── CONSENSUS_EXPERIMENTS.md          [READ THIS FIRST]
 │   ├── CONSENSUS_ONLY.py
 │   ├── CONSENSUS_BASIS_TRANSFORM.py
 │   ├── CONSENSUS_BASIS_DIFFUSION.py
@@ -22,26 +22,27 @@ EXPERIMENTS/
 │   └── CONSENSUS_MULTIREP_TRAINING_FIXED.py
 │
 ├── 📁 TIMESCALE_EXPERIMENTS/
-│   ├── TIMESCALE_EXPERIMENTS.md          [READ THIS FIRST]
 │   ├── TRAINING_10_NESTED_TIMESCALES.py
 │   └── CONTINUOUS_LEARNING_SYSTEM.py
 │
 ├── 📁 IMAGE_EXPERIMENTS/
-│   ├── IMAGE_EXPERIMENTS.md              [READ THIS FIRST]
 │   └── IMAGE_TRANSFORM.py
 │
 └── 📁 TESTING_VALIDATION/
-    ├── TESTING_VALIDATION.md             [READ THIS FIRST]
     ├── BASELINE_TEST.py
     ├── GENERALIZATION_TEST.py
     └── COUNCIL_TRAINING.py
 ```
 
+**Note:** Experiment status documentation moved to `DOCS/STATUS_*.md` files for hierarchical memory.
+
 ---
 
-## Current Work (Top-Level)
+## Current Work
 
 ### 🌀 Active Inference for Atari
+
+**Location:** `ACTIVE_INFERENCE/`
 
 **Files:**
 - `ACTIVE_INFERENCE_ATARI.py` - Main trainer with curiosity-driven policy
@@ -60,7 +61,7 @@ EXPERIMENTS/
 
 **Quick Start:**
 ```python
-from ACTIVE_INFERENCE_ATARI import ActiveInferenceTrainer
+from EXPERIMENTS.ACTIVE_INFERENCE.ACTIVE_INFERENCE_ATARI import ActiveInferenceTrainer
 
 trainer = ActiveInferenceTrainer(
     env_name='ALE/Pong-v5',
@@ -70,8 +71,10 @@ trainer.train_loop(n_episodes=50)
 ```
 
 **Documentation:**
+- `DOCS/STATUS_ACTIVE_INFERENCE.md` - Current status checkpoint
 - `DOCS/ATTENTION_CURRICULUM.md` - Developmental curriculum approach
 - `DOCS/ACTIVE_INFERENCE_POLICY.md` - Curiosity-driven action selection
+- `DOCS/INVERSE_MODEL_FAILURE_NOTES.md` - What NOT to do (failed attempts)
 
 **Philosophy:** "What is worth exploring?" - Learn physics through prediction error, select actions that maximize learning opportunity
 
@@ -92,7 +95,7 @@ trainer.train_loop(n_episodes=50)
 
 ## 1. Consensus Experiments
 
-**Summary File:** `CONSENSUS_EXPERIMENTS.md`
+**Status:** `DOCS/STATUS_CONSENSUS.md`
 
 **Core Idea:** Multiple networks (W/X/Y/Z perspectives) learn by minimizing disagreement. Consensus = robust representation.
 
@@ -118,7 +121,7 @@ consensus_loss = Σ |network_i(x) - network_j(x)|²
 
 ## 2. Timescale Experiments
 
-**Summary File:** `TIMESCALE_EXPERIMENTS.md`
+**Status:** `DOCS/STATUS_TIMESCALE.md`
 
 **Core Idea:** Memory operates at multiple timescales following golden ratio (φ). Fast dynamics for immediate patterns, slow dynamics for long-term structure.
 
@@ -147,7 +150,7 @@ memory_i = memory_i * (1 - decay_i) + activity * decay_i
 
 ## 3. Image Experiments
 
-**Summary File:** `IMAGE_EXPERIMENTS.md`
+**Status:** `DOCS/STATUS_IMAGE.md`
 
 **Core Idea:** Learn geometric transformations (rotation, scaling, translation) as controlled test bed for architecture.
 
@@ -168,7 +171,7 @@ memory_i = memory_i * (1 - decay_i) + activity * decay_i
 
 ## 4. Testing & Validation
 
-**Summary File:** `TESTING_VALIDATION.md`
+**Status:** `DOCS/STATUS_TESTING.md`
 
 **Core Idea:** Rigorous baselines and ablations. Beautiful philosophy needs empirical grounding.
 
@@ -227,31 +230,32 @@ results = {
 ### Starting New Conversation?
 
 **Read this order:**
-1. `EXPERIMENTS/README.md` ← Navigation hub
-2. Top-level files (current work)
-3. Cluster `.md` files (summaries of past work)
-4. Individual experiment files (deep dive if needed)
+1. `EXPERIMENTS/README.md` ← Navigation hub (you are here)
+2. `DOCS/STATUS_*.md` files (checkpoint status of each cluster)
+3. Individual experiment files (deep dive if needed)
 
 **Tier 1 (Hub):** This file - high-level map
-**Tier 2 (Summaries):** Cluster `.md` files - detailed context
+**Tier 2 (Status):** `DOCS/STATUS_*.md` - checkpoint documentation
 **Tier 3 (Files):** Actual experiment code - full details
 
 ### Looking for Specific Topic?
 
-- **Curiosity/exploration** → `ACTIVE_INFERENCE_POLICY.md`
-- **Developmental learning** → `ATTENTION_CURRICULUM.md`
-- **Multi-perspective** → `CONSENSUS_EXPERIMENTS.md`
-- **Temporal dynamics** → `TIMESCALE_EXPERIMENTS.md`
-- **Spatial reasoning** → `IMAGE_EXPERIMENTS.md`
-- **Validation** → `TESTING_VALIDATION.md`
+- **Active inference status** → `DOCS/STATUS_ACTIVE_INFERENCE.md`
+- **Curiosity/exploration** → `DOCS/ACTIVE_INFERENCE_POLICY.md`
+- **Developmental learning** → `DOCS/ATTENTION_CURRICULUM.md`
+- **Multi-perspective** → `DOCS/STATUS_CONSENSUS.md`
+- **Temporal dynamics** → `DOCS/STATUS_TIMESCALE.md`
+- **Spatial reasoning** → `DOCS/STATUS_IMAGE.md`
+- **Validation** → `DOCS/STATUS_TESTING.md`
+- **Failed attempts** → `DOCS/INVERSE_MODEL_FAILURE_NOTES.md`
 
 ### Adding New Experiment?
 
-1. Create file at top-level `EXPERIMENTS/`
-2. Work until complete/archived
-3. Move to appropriate cluster (or create new)
-4. Update cluster `.md` summary
-5. Update this `README.md`
+1. Create file in appropriate cluster subdirectory (or at top-level if exploratory)
+2. Work until complete/stable
+3. Update or create `DOCS/STATUS_*.md` checkpoint documentation
+4. Update this `README.md` navigation hub
+5. Archive or integrate into core codebase when mature
 
 ---
 
@@ -313,11 +317,12 @@ results = {
 ## Statistics
 
 ```
-Total Experiments: 12 files
-Active Development: 2 files (Active Inference)
+Total Experiments: 11 Python files (1 removed)
+Active Development: 2 files (ACTIVE_INFERENCE/)
 Archived Clusters: 4 clusters
-Documentation: 6 markdown files
-Lines of Code: ~2500 (experiments) + ~800 (docs)
+Status Documentation: 5 checkpoint files (DOCS/STATUS_*.md)
+Lines of Code: ~2200 (experiments) + ~1200 (docs)
+Hierarchical Organization: ✅ Python in EXPERIMENTS/, Docs in DOCS/
 ```
 
 ---
@@ -344,14 +349,15 @@ Lines of Code: ~2500 (experiments) + ~800 (docs)
 # List all experiments
 ls EXPERIMENTS/
 
-# List a cluster
-ls EXPERIMENTS/CONSENSUS_EXPERIMENTS/
+# List active inference cluster
+ls EXPERIMENTS/ACTIVE_INFERENCE/
 
-# Read a summary
-cat EXPERIMENTS/CONSENSUS_EXPERIMENTS.md
+# Read status checkpoints
+cat DOCS/STATUS_ACTIVE_INFERENCE.md
+cat DOCS/STATUS_CONSENSUS.md
 
 # Run active inference
-python EXPERIMENTS/ACTIVE_INFERENCE_ATARI.py
+python EXPERIMENTS/ACTIVE_INFERENCE/ACTIVE_INFERENCE_ATARI.py
 
 # Check git history
 git log --oneline EXPERIMENTS/
@@ -359,5 +365,5 @@ git log --oneline EXPERIMENTS/
 
 ---
 
-**Last Updated:** November 9, 2025
-**Version:** 1.0 (Initial organization)
+**Last Updated:** November 11, 2025
+**Version:** 2.0 (Hierarchical memory reorganization - Python in EXPERIMENTS/, Docs in DOCS/)
