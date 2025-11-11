@@ -717,6 +717,14 @@ class MaskedTrainer:
         plt.tight_layout()
         plt.show()
 
+        # Reset memory again before returning to training (batch size will change back to 16)
+        self.model.forward_model.dual_tetra.fast_field = None
+        self.model.forward_model.dual_tetra.medium_field = None
+        self.model.forward_model.dual_tetra.slow_field = None
+        self.model.inverse_model.dual_tetra.fast_field = None
+        self.model.inverse_model.dual_tetra.medium_field = None
+        self.model.inverse_model.dual_tetra.slow_field = None
+
         self.model.train()
 
     def train_with_live_viz(self, n_episodes=10, steps_per_episode=50, viz_every=2):
