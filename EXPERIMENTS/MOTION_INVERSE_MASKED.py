@@ -291,12 +291,13 @@ class MaskedInverseModel(nn.Module):
 
         # Apply mask: set invalid actions to -inf (so they never get chosen)
         if action_mask is not None:
+            # Expand mask to match batch size
+            batch_size = logits.size(0)
             if action_mask.dim() == 1:
-                action_mask = action_mask.unsqueeze(0)  # (1, n_actions)
+                action_mask = action_mask.unsqueeze(0).expand(batch_size, -1)  # (batch, n_actions)
 
-            # -inf for invalid actions (softmax will make them 0 probability)
-            masked_logits = logits.clone()
-            masked_logits[action_mask == 0] = -1e9
+            # Use masked_fill for proper broadcasting
+            masked_logits = logits.masked_fill(action_mask == 0, -1e9)
 
             return masked_logits
 
