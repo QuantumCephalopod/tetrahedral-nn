@@ -30,6 +30,13 @@ except ImportError:
     subprocess.check_call(['pip', 'install', '-q', 'gymnasium[atari]', 'gymnasium[accept-rom-license]'])
     import gymnasium as gym
 
+# Import the REAL tetrahedral architecture
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from Z_COUPLING.Z_interface_coupling import DualTetrahedralNetwork
+
 φ = (1 + 5**0.5) / 2
 
 
@@ -37,7 +44,7 @@ except ImportError:
 # ATARI ACTION SPACE DEFINITIONS
 # ============================================================================
 
-# Full Atari action space (18 actions)
+# Full Atari action space (18 actions) - Standard ALE ordering
 ATARI_ACTION_NAMES = [
     'NOOP', 'FIRE', 'UP', 'RIGHT', 'LEFT', 'DOWN',
     'UPRIGHT', 'UPLEFT', 'DOWNRIGHT', 'DOWNLEFT',
@@ -45,12 +52,12 @@ ATARI_ACTION_NAMES = [
     'UPRIGHTFIRE', 'UPLEFTFIRE', 'DOWNRIGHTFIRE', 'DOWNLEFTFIRE'
 ]
 
-# Game-specific valid actions
+# Game-specific valid actions (meaningful actions only)
 GAME_ACTION_MASKS = {
-    'ALE/Pong-v5': [0, 2, 3],  # NOOP, UP, DOWN (paddle only moves vertically)
-    'ALE/Breakout-v5': [0, 1, 2, 3],  # NOOP, FIRE, RIGHT, LEFT
-    'ALE/SpaceInvaders-v5': [0, 1, 2, 3, 4, 10, 11, 12],  # More actions
-    'ALE/MontezumaRevenge-v5': list(range(18)),  # All 18 actions
+    'ALE/Pong-v5': [0, 2, 5],  # NOOP, UP, DOWN (paddle moves vertically only)
+    'ALE/Breakout-v5': [0, 1, 3, 4],  # NOOP, FIRE, RIGHT, LEFT (horizontal paddle + fire to launch)
+    'ALE/SpaceInvaders-v5': [0, 1, 3, 4, 10, 11, 12],  # Movement + fire combos
+    'ALE/MontezumaRevenge-v5': list(range(18)),  # Full platformer - all 18 actions
 }
 
 
@@ -119,22 +126,15 @@ class ActionEncoder(nn.Module):
 
 
 # ============================================================================
-# SIMPLE DUAL TETRAHEDRAL (Stub for now)
+# REAL DUAL TETRAHEDRAL NETWORK (imported from Z_COUPLING)
 # ============================================================================
 
-class DualTetrahedralNetwork(nn.Module):
-    """Simplified dual-tetra network (replace with your real one)"""
-    def __init__(self, input_dim, output_dim, latent_dim=128,
-                 coupling_strength=0.5, output_mode="weighted"):
-        super().__init__()
-        self.fc1 = nn.Linear(input_dim, latent_dim)
-        self.fc2 = nn.Linear(latent_dim, latent_dim)
-        self.fc3 = nn.Linear(latent_dim, output_dim)
-
-    def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        return self.fc3(x)
+# DualTetrahedralNetwork is now imported from Z_COUPLING.Z_interface_coupling
+# This is the ACTUAL tetrahedral architecture with:
+# - Linear tetrahedron (4 vertices, 6 edges, 4 faces, NO ReLU)
+# - Nonlinear tetrahedron (4 vertices, 6 edges, 4 faces, WITH ReLU)
+# - Inter-face coupling (4 bidirectional attention pairs)
+# - Multi-timescale memory (golden ratio decay)
 
 
 # ============================================================================
