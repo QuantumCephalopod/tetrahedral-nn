@@ -78,6 +78,85 @@ def get_action_mask(env_name, n_actions=18):
 
 
 # ============================================================================
+# VISUAL ATTENTION MASKING (Curriculum Learning)
+# ============================================================================
+
+def apply_attention_mask(frame, mask_amount, player='right'):
+    """
+    Apply attention mask to focus on controllable region.
+
+    Developmental curriculum: start with own paddle, gradually expand view.
+
+    Pong is played LEFT-RIGHT (paddles on sides, not top/bottom):
+      - Player paddle: right side (usually)
+      - Opponent paddle: left side
+      - Ball: moves horizontally between paddles
+
+    Args:
+        frame: Tensor (C, H, W) or (B, C, H, W)
+        mask_amount: 0.0 = no mask, 1.0 = full mask (only player's side visible)
+        player: 'right' or 'left' (which side is the agent's paddle)
+
+    Returns:
+        Masked frame (same shape as input)
+    """
+    if mask_amount == 0.0:
+        return frame  # No masking
+
+    # Handle both batched and single frames
+    is_batched = frame.dim() == 4
+    if not is_batched:
+        frame = frame.unsqueeze(0)
+
+    batch, channels, height, width = frame.shape
+
+    # Create mask
+    mask = torch.ones_like(frame)
+
+    # Mask opponent's region (LEFT-RIGHT for Pong!)
+    if player == 'right':
+        # Player on right, opponent on left
+        # mask_amount=1.0 → mask entire left half (columns 0 to width/2)
+        # mask_amount=0.618 → mask left 30.9% of screen
+        opponent_region_width = width // 2
+        mask_width = int(opponent_region_width * mask_amount)
+        mask[:, :, :, :mask_width] = 0.0
+    else:
+        # Player on left, opponent on right
+        opponent_region_width = width // 2
+        mask_width = int(opponent_region_width * mask_amount)
+        mask[:, :, :, -mask_width:] = 0.0
+
+    masked_frame = frame * mask
+
+    if not is_batched:
+        masked_frame = masked_frame.squeeze(0)
+
+    return masked_frame
+
+
+class MaskScheduler:
+    """
+    Curriculum scheduler for gradually revealing the screen.
+
+    Start: mask_amount = 1.0 (only see own paddle)
+    End: mask_amount = 0.0 (see everything)
+    """
+    def __init__(self, start_mask=1.0, end_mask=0.0, total_steps=5000):
+        self.start_mask = start_mask
+        self.end_mask = end_mask
+        self.total_steps = total_steps
+
+    def get_mask_amount(self, step):
+        """Linear decay from start_mask to end_mask"""
+        if step >= self.total_steps:
+            return self.end_mask
+
+        progress = step / self.total_steps
+        return self.start_mask + (self.end_mask - self.start_mask) * progress
+
+
+# ============================================================================
 # STATE ENCODER (Frame → Abstract State)
 # ============================================================================
 
@@ -250,13 +329,22 @@ class MaskedCoupledModel(nn.Module):
     def compute_losses(self, frame_t, frame_t1, action, action_mask,
                       forward_weight=1.0,
                       inverse_weight=1.0,
-                      consistency_weight=0.5):
+                      consistency_weight=0.5,
+                      visual_mask_amount=0.0,
+                      player='right'):
         """
-        Compute all losses with action masking.
+        Compute all losses with action masking and visual masking.
 
         Args:
             action_mask: (n_actions,) binary mask for valid actions
+            visual_mask_amount: 0.0-1.0, amount to mask opponent's side
+            player: 'right' or 'left' paddle
         """
+        # Apply visual masking to inputs (curriculum learning)
+        if visual_mask_amount > 0.0:
+            frame_t = apply_attention_mask(frame_t, visual_mask_amount, player)
+            frame_t1 = apply_attention_mask(frame_t1, visual_mask_amount, player)
+
         # Encode states
         state_t = self.encode_state(frame_t)
         state_t1 = self.encode_state(frame_t1)
@@ -385,12 +473,20 @@ class MaskedTrainer:
         # Buffer
         self.buffer = ExperienceBuffer(capacity=buffer_capacity)
 
+        # Visual attention curriculum (gradually reveal screen)
+        self.mask_scheduler = MaskScheduler(
+            start_mask=1.0,  # Start: only see own paddle
+            end_mask=0.0,    # End: see everything
+            total_steps=2000  # Reveal over 2000 steps
+        )
+        self.player_side = 'right'  # Which paddle we control
+
         # Metrics
         self.step_count = 0
         self.episode_count = 0
         self.history = {
             'forward': [], 'inverse': [], 'consistency': [],
-            'total': [], 'accuracy': []
+            'total': [], 'accuracy': [], 'mask_amount': []
         }
 
     def preprocess_frame(self, frame):
@@ -432,16 +528,21 @@ class MaskedTrainer:
         if len(self.buffer) < self.batch_size:
             return None
 
+        # Get current visual mask amount (curriculum)
+        visual_mask_amount = self.mask_scheduler.get_mask_amount(self.step_count)
+
         # Sample batch
         frames_t, actions, frames_t1 = self.buffer.sample(self.batch_size)
         frames_t = frames_t.to(self.device)
         actions = actions.to(self.device)
         frames_t1 = frames_t1.to(self.device)
 
-        # Compute losses with mask
+        # Compute losses with both action and visual masking
         losses = self.model.compute_losses(
             frames_t, frames_t1, actions,
-            action_mask=self.action_mask
+            action_mask=self.action_mask,
+            visual_mask_amount=visual_mask_amount,
+            player=self.player_side
         )
 
         # Backprop
@@ -456,6 +557,9 @@ class MaskedTrainer:
             if key in losses:
                 val = losses[key] if key == 'total' else losses[key]
                 self.history[key].append(val.item() if torch.is_tensor(val) else val)
+
+        # Track mask amount
+        self.history['mask_amount'].append(visual_mask_amount)
 
         return losses
 
@@ -485,21 +589,24 @@ class MaskedTrainer:
                 avg_forward = np.mean(episode_metrics['forward'])
                 avg_inverse = np.mean(episode_metrics['inverse'])
                 avg_accuracy = np.mean(episode_metrics['accuracy'])
+                current_mask = self.mask_scheduler.get_mask_amount(self.step_count)
 
                 print(f"📊 Episode {episode+1}/{n_episodes}")
                 print(f"   Steps: {self.step_count}")
                 print(f"   Forward loss: {avg_forward:.6f}")
                 print(f"   Inverse loss: {avg_inverse:.6f}")
                 print(f"   Accuracy: {avg_accuracy*100:.2f}% (random={100/len(self.valid_actions):.2f}%)")
+                print(f"   Visual mask: {current_mask*100:.0f}% (100%=only own paddle, 0%=see all)")
                 print(f"   Buffer: {len(self.buffer)}")
                 print()
 
     def live_visualize(self, n_samples=4):
         """
         Live visualization showing:
-        - Frames
+        - Full frames (ground truth)
+        - Masked frames (what model sees - curriculum learning)
         - Predictions
-        - Valid vs invalid actions (grayed out)
+        - Valid vs invalid actions
         """
         from IPython.display import clear_output
 
@@ -507,46 +614,60 @@ class MaskedTrainer:
             print("Not enough data yet...")
             return
 
+        # Get current mask amount
+        visual_mask_amount = self.mask_scheduler.get_mask_amount(self.step_count)
+
         self.model.eval()
         frames_t, actions, frames_t1 = self.buffer.sample(n_samples)
         frames_t = frames_t.to(self.device)
         frames_t1 = frames_t1.to(self.device)
         actions = actions.to(self.device)
 
+        # Apply visual masking (what model actually sees)
+        masked_frames_t = apply_attention_mask(frames_t, visual_mask_amount, self.player_side)
+        masked_frames_t1 = apply_attention_mask(frames_t1, visual_mask_amount, self.player_side)
+
         with torch.no_grad():
-            state_t = self.model.encode_state(frames_t)
-            state_t1 = self.model.encode_state(frames_t1)
+            # Encode MASKED frames (like during training)
+            state_t = self.model.encode_state(masked_frames_t)
+            state_t1 = self.model.encode_state(masked_frames_t1)
             logits = self.model.inverse_model(state_t, state_t1, self.action_mask)
             pred_actions = torch.argmax(logits, dim=-1)
             probs = torch.softmax(logits, dim=-1)
 
         clear_output(wait=True)
 
-        fig = plt.figure(figsize=(20, n_samples * 3.5))
+        fig = plt.figure(figsize=(24, n_samples * 3.5))
 
         for i in range(n_samples):
-            # Frame t
-            ax1 = plt.subplot(n_samples, 4, i*4 + 1)
+            # Full Frame t (ground truth)
+            ax1 = plt.subplot(n_samples, 5, i*5 + 1)
             ax1.imshow(frames_t[i].cpu().permute(1, 2, 0).numpy())
-            ax1.set_title(f'Frame t', fontsize=12, fontweight='bold')
+            ax1.set_title(f'Full Frame t', fontsize=10, fontweight='bold')
             ax1.axis('off')
 
-            # Frame t+1
-            ax2 = plt.subplot(n_samples, 4, i*4 + 2)
-            ax2.imshow(frames_t1[i].cpu().permute(1, 2, 0).numpy())
-            ax2.set_title(f'Frame t+1', fontsize=12, fontweight='bold')
+            # Masked Frame t (what model sees)
+            ax2 = plt.subplot(n_samples, 5, i*5 + 2)
+            ax2.imshow(masked_frames_t[i].cpu().permute(1, 2, 0).numpy())
+            ax2.set_title(f'Model Sees (Mask={visual_mask_amount:.2f})', fontsize=10, fontweight='bold', color='purple')
             ax2.axis('off')
 
-            # State diff visualization
-            ax3 = plt.subplot(n_samples, 4, i*4 + 3)
-            state_diff = (state_t1[i] - state_t[i]).cpu().numpy().reshape(16, 8)
-            im = ax3.imshow(state_diff, cmap='RdBu_r', aspect='auto')
-            ax3.set_title('State Change', fontsize=12, fontweight='bold')
+            # Full Frame t+1
+            ax3 = plt.subplot(n_samples, 5, i*5 + 3)
+            ax3.imshow(frames_t1[i].cpu().permute(1, 2, 0).numpy())
+            ax3.set_title(f'Full Frame t+1', fontsize=10, fontweight='bold')
             ax3.axis('off')
-            plt.colorbar(im, ax=ax3, fraction=0.046)
 
-            # Action prediction (with masking visualization)
-            ax4 = plt.subplot(n_samples, 4, i*4 + 4)
+            # State diff visualization
+            ax4 = plt.subplot(n_samples, 5, i*5 + 4)
+            state_diff = (state_t1[i] - state_t[i]).cpu().numpy().reshape(16, 8)
+            im = ax4.imshow(state_diff, cmap='RdBu_r', aspect='auto')
+            ax4.set_title('State Change', fontsize=10, fontweight='bold')
+            ax4.axis('off')
+            plt.colorbar(im, ax=ax4, fraction=0.046)
+
+            # Action prediction
+            ax5 = plt.subplot(n_samples, 5, i*5 + 5)
             true_action = actions[i].item()
             pred_action = pred_actions[i].item()
 
@@ -554,7 +675,7 @@ class MaskedTrainer:
             valid_probs = probs[i][self.valid_actions].cpu().numpy()
             valid_names = [ATARI_ACTION_NAMES[idx] for idx in self.valid_actions]
 
-            bars = ax4.bar(range(len(self.valid_actions)), valid_probs)
+            bars = ax5.bar(range(len(self.valid_actions)), valid_probs)
 
             # Color bars
             true_idx_in_valid = self.valid_actions.index(true_action)
@@ -564,20 +685,21 @@ class MaskedTrainer:
             if pred_idx_in_valid >= 0:
                 bars[pred_idx_in_valid].set_color('red' if pred_action != true_action else 'green')
 
-            ax4.set_xticks(range(len(self.valid_actions)))
-            ax4.set_xticklabels(valid_names, rotation=45, ha='right', fontsize=9)
-            ax4.set_ylim([0, 1])
-            ax4.axhline(1/len(self.valid_actions), color='gray', linestyle='--', alpha=0.5, label='random')
+            ax5.set_xticks(range(len(self.valid_actions)))
+            ax5.set_xticklabels(valid_names, rotation=45, ha='right', fontsize=9)
+            ax5.set_ylim([0, 1])
+            ax5.axhline(1/len(self.valid_actions), color='gray', linestyle='--', alpha=0.5, label='random')
 
             # Title with color
             correct = pred_action == true_action
-            ax4.set_title(f'TRUE: {ATARI_ACTION_NAMES[true_action]}\nPRED: {ATARI_ACTION_NAMES[pred_action]}',
-                         fontsize=11, fontweight='bold',
+            ax5.set_title(f'TRUE: {ATARI_ACTION_NAMES[true_action]}\nPRED: {ATARI_ACTION_NAMES[pred_action]}',
+                         fontsize=10, fontweight='bold',
                          color='green' if correct else 'red')
 
         # Add overall stats at top
         recent_acc = self.history["accuracy"][-1] if self.history["accuracy"] else 0
-        fig.suptitle(f'STEP {self.step_count} | Buffer: {len(self.buffer)} | Accuracy: {recent_acc*100:.1f}% | Valid actions: {len(self.valid_actions)}/{self.n_actions}',
+        mask_pct = visual_mask_amount * 100
+        fig.suptitle(f'STEP {self.step_count} | Buffer: {len(self.buffer)} | Accuracy: {recent_acc*100:.1f}% | Mask: {mask_pct:.0f}% | Valid: {len(self.valid_actions)}/{self.n_actions}',
                      fontsize=14, fontweight='bold', y=0.995)
 
         plt.tight_layout()
