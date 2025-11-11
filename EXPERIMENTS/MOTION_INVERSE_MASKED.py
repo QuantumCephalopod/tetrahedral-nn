@@ -619,6 +619,17 @@ class MaskedTrainer:
         visual_mask_amount = self.mask_scheduler.get_mask_amount(self.step_count)
 
         self.model.eval()
+
+        # Reset memory fields in DualTetrahedralNetwork (batch size changes)
+        # The multi-timescale memory stores batch-specific state
+        # We need to reset it when batch size changes from training (16) to viz (4)
+        self.model.forward_model.dual_tetra.fast_field = None
+        self.model.forward_model.dual_tetra.medium_field = None
+        self.model.forward_model.dual_tetra.slow_field = None
+        self.model.inverse_model.dual_tetra.fast_field = None
+        self.model.inverse_model.dual_tetra.medium_field = None
+        self.model.inverse_model.dual_tetra.slow_field = None
+
         frames_t, actions, frames_t1 = self.buffer.sample(n_samples)
         frames_t = frames_t.to(self.device)
         frames_t1 = frames_t1.to(self.device)
