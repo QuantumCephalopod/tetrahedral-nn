@@ -36,13 +36,18 @@ from pathlib import Path
 
 # Assume W, X, Y, Z cells define DualTetrahedralNetwork
 from EXPERIMENTS.ACTIVE_INFERENCE.FLOW_INVERSE_MODEL import (
-    compute_optical_flow,
     flow_to_rgb,
     FlowForwardModel,
     FlowInverseModel,
     CoupledFlowModel,
     VALID_ACTIONS,
     ACTION_NAMES
+)
+
+# Import CORRECT flow computation (with padding, not stretching!)
+from EXPERIMENTS.ACTIVE_INFERENCE.FLOW_PREPROCESSING_FIX import (
+    compute_optical_flow_correct as compute_optical_flow,
+    pad_to_square
 )
 
 φ = (1 + 5**0.5) / 2  # Golden ratio
@@ -99,6 +104,12 @@ class PureOnlineFlowTrainer:
         self.frameskip = frameskip
         self.effective_fps = 60.0 / frameskip
         print(f"⏰ Sampling frequency: {self.effective_fps:.1f} Hz (frameskip={frameskip})")
+
+        # Warning about frameskip
+        if frameskip > 5:
+            print(f"⚠️  WARNING: frameskip={frameskip} is large!")
+            print(f"   Optical flow works best with small motion (frameskip=3-5)")
+            print(f"   Large frameskip → objects 'teleport' → flow shows dots, not continuity")
 
         # Initialize environment
         import gymnasium as gym
