@@ -862,7 +862,7 @@ class FlowInverseTrainer:
         return losses
 
     def train_loop_online(self, n_steps=500, viz_every=100, save_every=0,
-                         policy_temperature=1.0, beta=None):
+                         policy_temperature=1.0, beta=None, show_gameplay=True):
         """
         TRUE ONLINE LEARNING - like nature actually works!
 
@@ -872,6 +872,9 @@ class FlowInverseTrainer:
         Every action updates the model RIGHT NOW.
 
         This is how biology works. This is how it SHOULD work.
+
+        Args:
+            show_gameplay: If True, renders gameplay frames live (WATCH IT LEARN!)
         """
         print("\n" + "="*70)
         print("🌀 ONLINE ACTIVE INFERENCE - LIVE LEARNING")
@@ -881,6 +884,8 @@ class FlowInverseTrainer:
         print(f"Steps: {n_steps}")
         print(f"Temperature: {policy_temperature}")
         print(f"β: {beta if beta else 'auto (0.05)'}")
+        if show_gameplay:
+            print("🎬 LIVE GAMEPLAY: Enabled - watch it learn!")
         print("="*70 + "\n")
 
         # Initialize
@@ -890,6 +895,13 @@ class FlowInverseTrainer:
 
         episodes_done = 0
         step = 0
+
+        # Live gameplay visualization
+        if show_gameplay:
+            import matplotlib.pyplot as plt
+            from IPython import display
+            fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+            plt.ion()  # Interactive mode
 
         # Bootstrap: Need TWO frames to get first flow
         action = random.choice(valid_actions)
@@ -921,6 +933,38 @@ class FlowInverseTrainer:
             # =================================================================
             for _ in range(self.frameskip):
                 frame_raw, reward, terminated, truncated, info = self.env.step(action)
+
+                # 🎬 SHOW IT LIVE!
+                if show_gameplay and step % 2 == 0:  # Every other step (30 Hz display)
+                    axes[0].clear()
+                    axes[0].imshow(frame_raw)
+                    axes[0].set_title(f'Step {step} | Action: {ACTION_NAMES.get(action, action)}', fontsize=12)
+                    axes[0].axis('off')
+
+                    # Show flow field
+                    if len(self.buffer) > 0:
+                        axes[1].clear()
+                        flow_rgb = flow_to_rgb(flow_prev)
+                        axes[1].imshow(flow_rgb)
+                        axes[1].set_title('Flow Field (Velocity)', fontsize=12)
+                        axes[1].axis('off')
+
+                    # Show learning progress
+                    if len(self.history['accuracy']) > 10:
+                        axes[2].clear()
+                        recent_acc = self.history['accuracy'][-100:]
+                        axes[2].plot(recent_acc, color='green', linewidth=2)
+                        axes[2].axhline(1/len(valid_actions), color='red', linestyle='--', label='Random')
+                        axes[2].set_ylim([0, 1])
+                        axes[2].set_title(f'Accuracy: {recent_acc[-1]*100:.1f}%', fontsize=12)
+                        axes[2].set_xlabel('Recent Steps')
+                        axes[2].legend()
+                        axes[2].grid(alpha=0.3)
+
+                    plt.tight_layout()
+                    display.clear_output(wait=True)
+                    display.display(fig)
+
                 if terminated or truncated:
                     break
 
@@ -954,8 +998,8 @@ class FlowInverseTrainer:
                     if key in losses:
                         self.history[key].append(losses[key] if isinstance(losses[key], float) else losses[key].item())
 
-                # Log
-                if step % 10 == 0:
+                # Log (less frequent now that we're watching!)
+                if step % 50 == 0:
                     print(f"Step {step:4d} | "
                           f"Fwd: {losses['forward']:.4f} | "
                           f"Inv: {losses['inverse']:.4f} | "
@@ -994,7 +1038,7 @@ class FlowInverseTrainer:
                 episodes_done += 1
                 self.episode_count += 1
 
-            # Visualization
+            # Visualization (static snapshots - less frequent now)
             if viz_every and step % viz_every == 0 and len(self.buffer) >= 4:
                 print(f"\n🎨 Generating visualization at step {step}...")
                 self._save_live_viz(f"online_step{step:05d}")
@@ -1003,6 +1047,10 @@ class FlowInverseTrainer:
             # Checkpoint
             if save_every and step % save_every == 0 and step > 0:
                 self.save_checkpoint(f"online_step{step}.pt", include_buffer=False)
+
+        if show_gameplay:
+            plt.ioff()
+            plt.close(fig)
 
         print("\n✅ Online learning complete!")
         print(f"   Total steps: {step}")
@@ -1429,10 +1477,11 @@ print("\n" + "="*70)
 print("🌊 FLOW-BASED TETRAHEDRAL INVERSE MODEL - READY")
 print("="*70)
 print("\n📚 USAGE EXAMPLES:\n")
-print("1️⃣  ONLINE LEARNING (Act → Learn → Act → Learn - LIKE NATURE!)")
+print("1️⃣  WATCH IT LEARN LIVE! (like you wanted)")
 print("   trainer = FlowInverseTrainer(env_name='ALE/Pong-v5', frameskip=10)")
-print("   trainer.train_loop_online(n_steps=500)  # Updates weights EVERY action!")
-print("   # No batching. No delays. Continuous learning.")
+print("   trainer.train_loop_online(n_steps=500, show_gameplay=True)")
+print("   # 🎬 LIVE GAMEPLAY: See it play as it learns!")
+print("   # Game + Flow field + Learning curve updating in real-time")
 print()
 print("2️⃣  Adjust exploration (β parameter)")
 print("   # High β: Seek diverse outcomes (like infant exploration)")
