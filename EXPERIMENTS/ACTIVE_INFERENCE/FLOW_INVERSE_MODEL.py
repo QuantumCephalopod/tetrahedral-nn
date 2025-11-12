@@ -861,6 +861,159 @@ class FlowInverseTrainer:
 
         return losses
 
+    def train_loop_online(self, n_steps=500, viz_every=100, save_every=0,
+                         policy_temperature=1.0, beta=None):
+        """
+        TRUE ONLINE LEARNING - like nature actually works!
+
+        Act → Learn IMMEDIATELY → Act → Learn IMMEDIATELY → ...
+
+        No batching. No "collect then train" bullshit.
+        Every action updates the model RIGHT NOW.
+
+        This is how biology works. This is how it SHOULD work.
+        """
+        print("\n" + "="*70)
+        print("🌀 ONLINE ACTIVE INFERENCE - LIVE LEARNING")
+        print("="*70)
+        print("Act → Learn → Act → Learn → ...")
+        print("No batching. No delays. Like nature.")
+        print(f"Steps: {n_steps}")
+        print(f"Temperature: {policy_temperature}")
+        print(f"β: {beta if beta else 'auto (0.05)'}")
+        print("="*70 + "\n")
+
+        # Initialize
+        valid_actions = VALID_ACTIONS.get(self.env_name, list(range(self.n_actions)))
+        frame_raw, _ = self.env.reset()
+        frame_prev = self.preprocess_frame(frame_raw)
+
+        episodes_done = 0
+        step = 0
+
+        # Bootstrap: Need TWO frames to get first flow
+        action = random.choice(valid_actions)
+        for _ in range(self.frameskip):
+            frame_raw, reward, terminated, truncated, info = self.env.step(action)
+            if terminated or truncated:
+                break
+        frame_curr = self.preprocess_frame(frame_raw)
+        flow_prev = compute_optical_flow(frame_prev, frame_curr, method=self.flow_method)
+
+        print(f"🌊 Starting online learning loop...\n")
+
+        while step < n_steps:
+            # =================================================================
+            # 1. SELECT ACTION (Active Inference)
+            # =================================================================
+            if len(self.buffer) > 0:  # Have at least one experience
+                action, policy_info = self.select_action_active_inference(
+                    flow_prev,
+                    temperature=policy_temperature,
+                    beta=beta
+                )
+            else:
+                # Very first step - random
+                action = random.choice(valid_actions)
+
+            # =================================================================
+            # 2. EXECUTE ACTION
+            # =================================================================
+            for _ in range(self.frameskip):
+                frame_raw, reward, terminated, truncated, info = self.env.step(action)
+                if terminated or truncated:
+                    break
+
+            frame_next = self.preprocess_frame(frame_raw)
+            flow_curr = compute_optical_flow(frame_curr, frame_next, method=self.flow_method)
+
+            # =================================================================
+            # 3. LEARN IMMEDIATELY (Online update!)
+            # =================================================================
+            if len(self.buffer) >= self.batch_size:
+                # We have enough history for temporal context
+                # Learn from this SINGLE transition RIGHT NOW
+
+                flows_t = flow_prev.unsqueeze(0).to(self.device)      # (1, 2, H, W)
+                actions = torch.tensor([action], dtype=torch.long).to(self.device)
+                flows_t1 = flow_curr.unsqueeze(0).to(self.device)
+
+                # Compute loss
+                losses = self.model.compute_losses(
+                    flows_t, flows_t1, actions,
+                    action_mask=self.action_mask
+                )
+
+                # Update weights IMMEDIATELY
+                self.optimizer.zero_grad()
+                losses['total'].backward()
+                self.optimizer.step()
+
+                # Track metrics
+                for key in self.history:
+                    if key in losses:
+                        self.history[key].append(losses[key] if isinstance(losses[key], float) else losses[key].item())
+
+                # Log
+                if step % 10 == 0:
+                    print(f"Step {step:4d} | "
+                          f"Fwd: {losses['forward']:.4f} | "
+                          f"Inv: {losses['inverse']:.4f} | "
+                          f"Acc: {losses['accuracy']*100:.1f}% | "
+                          f"Eps: {episodes_done}")
+
+            # =================================================================
+            # 4. STORE (for temporal context in next updates)
+            # =================================================================
+            self.buffer.add(flow_prev, action, flow_curr)
+
+            # =================================================================
+            # 5. CONTINUE (no separation between acting and learning!)
+            # =================================================================
+            flow_prev = flow_curr
+            frame_prev = frame_next
+            frame_curr = frame_next
+
+            step += 1
+            self.step_count += 1
+
+            # Reset if episode ended
+            if terminated or truncated:
+                frame_raw, _ = self.env.reset()
+                frame_prev = self.preprocess_frame(frame_raw)
+
+                # Bootstrap next episode
+                action = random.choice(valid_actions)
+                for _ in range(self.frameskip):
+                    frame_raw, reward, terminated, truncated, info = self.env.step(action)
+                    if terminated or truncated:
+                        break
+                frame_curr = self.preprocess_frame(frame_raw)
+                flow_prev = compute_optical_flow(frame_prev, frame_curr, method=self.flow_method)
+
+                episodes_done += 1
+                self.episode_count += 1
+
+            # Visualization
+            if viz_every and step % viz_every == 0 and len(self.buffer) >= 4:
+                print(f"\n🎨 Generating visualization at step {step}...")
+                self._save_live_viz(f"online_step{step:05d}")
+                print()
+
+            # Checkpoint
+            if save_every and step % save_every == 0 and step > 0:
+                self.save_checkpoint(f"online_step{step}.pt", include_buffer=False)
+
+        print("\n✅ Online learning complete!")
+        print(f"   Total steps: {step}")
+        print(f"   Episodes: {episodes_done}")
+        print(f"   Every action updated the model immediately.")
+        print(f"   No batching. No delays. Like nature. 🌊\n")
+
+        # Final checkpoint
+        if save_every:
+            self.save_checkpoint(f"online_final.pt", include_buffer=True)
+
     def train_loop(self, n_episodes=10, steps_per_episode=50, viz_every=2,
                    use_active_inference=True, policy_temperature=1.0, beta=None,
                    active_inference_after=0, save_every=5, checkpoint_name=None):
@@ -1271,22 +1424,26 @@ print("\n" + "="*70)
 print("🌊 FLOW-BASED TETRAHEDRAL INVERSE MODEL - READY")
 print("="*70)
 print("\n📚 USAGE EXAMPLES:\n")
-print("1️⃣  Active Inference (DEFAULT - like nature!)")
+print("1️⃣  ONLINE LEARNING (Act → Learn → Act → Learn - LIKE NATURE!)")
 print("   trainer = FlowInverseTrainer(env_name='ALE/Pong-v5', frameskip=10)")
-print("   trainer.train_loop(n_episodes=10)  # Active inference by default!")
-print("   trainer.visualize_active_inference_policy()")
+print("   trainer.train_loop_online(n_steps=500)  # Updates weights EVERY action!")
+print("   # No batching. No delays. Continuous learning.")
 print()
 print("2️⃣  Adjust exploration (β parameter)")
 print("   # High β: Seek diverse outcomes (like infant exploration)")
-print("   trainer.train_loop(n_episodes=5, beta=0.1)")
+print("   trainer.train_loop_online(n_steps=500, beta=0.1)")
 print("   # Low β: Seek certain outcomes (like skilled performance)")
-print("   trainer.train_loop(n_episodes=5, beta=0.01)")
+print("   trainer.train_loop_online(n_steps=500, beta=0.01)")
 print()
-print("3️⃣  Visualize what model learned")
+print("3️⃣  Batch training (if you must - for GPU efficiency)")
+print("   trainer.train_loop(n_episodes=10)  # Collects, then trains")
+print("   # Still uses active inference, but not truly online")
+print()
+print("4️⃣  Visualize what model learned")
 print("   trainer.visualize_flow_predictions()")
 print("   trainer.visualize_active_inference_policy()")
 print()
-print("4️⃣  Test different natural frequencies")
+print("5️⃣  Test different natural frequencies")
 print("   # Theta (6 Hz) - φ-aligned with memory field - DEFAULT")
 print("   trainer_theta = FlowInverseTrainer(frameskip=10)")
 print("   # Alpha (10 Hz)")
@@ -1294,7 +1451,7 @@ print("   trainer_alpha = FlowInverseTrainer(frameskip=6)")
 print("   # Saccade (4 Hz) - human visual sampling")
 print("   trainer_saccade = FlowInverseTrainer(frameskip=15)")
 print()
-print("5️⃣  Resume from checkpoint")
+print("6️⃣  Resume from checkpoint")
 print("   trainer = FlowInverseTrainer(env_name='ALE/Pong-v5')")
 print("   trainer.load_checkpoint('checkpoints/autosave_ep50.pt')")
 print("   trainer.train_loop(n_episodes=10)  # Continues with active inference")
