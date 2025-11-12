@@ -447,15 +447,45 @@ class CoupledFlowModel(nn.Module):
                      inverse_weight * loss_inverse +
                      consistency_weight * loss_consistency)
 
-        # Metrics (also use masked logits for accuracy!)
+        # Metrics (use soft accuracy for effect-based, binary for label-based)
         with torch.no_grad():
-            if action_mask is not None:
-                masked_logits_accuracy = action_logits.clone()
-                mask_expanded = action_mask.unsqueeze(0).expand(action_logits.size(0), -1)
-                masked_logits_accuracy[mask_expanded == 0] = -1e9
-                accuracy = (masked_logits_accuracy.argmax(dim=-1) == action).float().mean()
+            if effect_based:
+                # SOFT ACCURACY: How well does predicted distribution match the soft targets?
+                # Instead of "is argmax correct?" (binary), measure "how much probability
+                # mass is on actions that explain the flow well?" (gradient)
+                #
+                # This respects the insight: "UP at border = NOOP at border" (both correct!)
+                # Binary accuracy would penalize one arbitrarily. Soft accuracy doesn't.
+
+                # Get predicted probabilities (only for valid actions)
+                action_probs_full = torch.softmax(masked_logits, dim=1)
+                action_probs_valid = action_probs_full[:, valid_action_indices]
+
+                # Soft accuracy = agreement between predicted and target distributions
+                # Use 1 - KL divergence, normalized to [0,1]
+                # High agreement → accuracy near 1.0
+                # Low agreement → accuracy near 0.0
+                kl_div = F.kl_div(
+                    action_probs_valid.log(),
+                    soft_targets,
+                    reduction='batchmean'
+                )
+                # Convert KL to similarity: exp(-kl) ∈ (0, 1]
+                # When KL=0 (perfect match): accuracy=1.0
+                # When KL=large (poor match): accuracy→0
+                accuracy = torch.exp(-kl_div).item()
+
             else:
-                accuracy = (action_logits.argmax(dim=-1) == action).float().mean()
+                # BINARY ACCURACY: Old way (for comparison/ablation)
+                # "Does argmax match the label?" (0 or 1)
+                if action_mask is not None:
+                    masked_logits_accuracy = action_logits.clone()
+                    mask_expanded = action_mask.unsqueeze(0).expand(action_logits.size(0), -1)
+                    masked_logits_accuracy[mask_expanded == 0] = -1e9
+                    accuracy = (masked_logits_accuracy.argmax(dim=-1) == action).float().mean().item()
+                else:
+                    accuracy = (action_logits.argmax(dim=-1) == action).float().mean().item()
+
             flow_magnitude = torch.sqrt((flow_t1 ** 2).sum(dim=1)).mean()
 
         return {
@@ -463,7 +493,7 @@ class CoupledFlowModel(nn.Module):
             'forward': loss_forward.item(),
             'inverse': loss_inverse.item(),
             'consistency': loss_consistency.item(),
-            'accuracy': accuracy.item(),
+            'accuracy': accuracy,  # Already converted to float above
             'flow_magnitude': flow_magnitude.item()
         }
 
@@ -529,7 +559,8 @@ class FlowInverseTrainer:
     """
     def __init__(self,
                  env_name='ALE/Pong-v5',
-                 img_size=128,
+                 img_size=210,  # 210 = Native Atari HEIGHT. Higher than old 128/160!
+                               # (Model forces square, but at least we use full vertical res)
                  latent_dim=128,
                  base_lr=0.0001,
                  buffer_capacity=10000,
@@ -549,6 +580,9 @@ class FlowInverseTrainer:
         print(f"🖥️  Device: {self.device}")
 
         self.img_size = img_size
+        print(f"🎯 Flow resolution: {img_size}×{img_size}")
+        print(f"   (Atari native is 210×160, we use 210×210 square due to model architecture)")
+        print(f"   (Previous default was 128×128 - this is 2.7× MORE pixels! Way less blocky!)")
         self.batch_size = batch_size
         self.flow_method = flow_method
         self.env_name = env_name
@@ -840,10 +874,42 @@ class FlowInverseTrainer:
         # Convert to tensor
         free_energies_tensor = torch.tensor(free_energies)
 
+        # Numerical stability checks
+        if torch.isnan(free_energies_tensor).any() or torch.isinf(free_energies_tensor).any():
+            print(f"⚠️  NaN/Inf detected in free energies! Using random action.")
+            print(f"   Free energies: {free_energies}")
+            action_idx = np.random.randint(len(valid_actions))
+            selected_action = valid_actions[action_idx]
+            return selected_action, {
+                'free_energies': free_energies,
+                'uncertainties': uncertainties,
+                'entropies': entropies,
+                'action_probs': np.ones(len(valid_actions)) / len(valid_actions),
+                'selected_idx': action_idx,
+                'beta': beta,
+                'temperature': temperature,
+                'fallback': True
+            }
+
         # Select action: minimize free energy (with temperature for stochasticity)
         # Negative because we want LOW free energy
         logits = -free_energies_tensor / temperature
+
+        # Clip logits to prevent overflow in softmax
+        logits = torch.clamp(logits, min=-20, max=20)
+
         probs = F.softmax(logits, dim=0)
+
+        # Add small epsilon for numerical stability
+        probs = probs + 1e-8
+        probs = probs / probs.sum()  # Renormalize
+
+        # Final safety check
+        if torch.isnan(probs).any() or torch.isinf(probs).any() or (probs < 0).any():
+            print(f"⚠️  Invalid probabilities after softmax! Using uniform distribution.")
+            print(f"   Logits: {logits}")
+            print(f"   Probs: {probs}")
+            probs = torch.ones(len(valid_actions)) / len(valid_actions)
 
         # Sample action stochastically (preserves exploration)
         action_idx = torch.multinomial(probs, 1).item()
@@ -1120,43 +1186,10 @@ class FlowInverseTrainer:
                 if 'lives' in info:
                     self.current_lives = info['lives']
 
-                # 🎬 SHOW IT LIVE!
-                if show_gameplay and step % 2 == 0:  # Every other step (30 Hz display)
-                    axes[0].clear()
-                    axes[0].imshow(frame_raw)
-                    title = f'Step {step} | Action: {ACTION_NAMES.get(action, action)}'
-                    if self.current_lives is not None:
-                        title += f' | Lives: {self.current_lives}'
-                    axes[0].set_title(title, fontsize=12)
-                    axes[0].axis('off')
-
-                    # Show flow field
-                    if len(self.buffer) > 0:
-                        axes[1].clear()
-                        flow_rgb = flow_to_rgb(flow_prev)
-                        axes[1].imshow(flow_rgb)
-                        axes[1].set_title('Flow Field (Velocity)', fontsize=12)
-                        axes[1].axis('off')
-
-                    # Show learning progress
-                    if len(self.history['accuracy']) > 10:
-                        axes[2].clear()
-                        recent_acc = self.history['accuracy'][-100:]
-                        axes[2].plot(recent_acc, color='green', linewidth=2)
-                        axes[2].axhline(1/len(valid_actions), color='red', linestyle='--', label='Random')
-                        axes[2].set_ylim([0, 1])
-                        axes[2].set_title(f'Accuracy: {recent_acc[-1]*100:.1f}%', fontsize=12)
-                        axes[2].set_xlabel('Recent Steps')
-                        axes[2].legend()
-                        axes[2].grid(alpha=0.3)
-
-                    plt.tight_layout()
-                    display.clear_output(wait=True)
-                    display.display(fig)
-
                 if terminated or truncated:
                     break
 
+            # Compute CURRENT flow (between frame_curr and frame_next)
             frame_next = self.preprocess_frame(frame_raw)
             flow_curr = compute_optical_flow(
                 frame_curr, frame_next,
@@ -1164,6 +1197,39 @@ class FlowInverseTrainer:
                 target_size=self.img_size,
                 add_saccade=self.use_saccades
             )
+
+            # 🎬 SHOW IT LIVE! (AFTER computing flow_curr so they're synchronized!)
+            if show_gameplay and step % 2 == 0:  # Every other step (30 Hz display)
+                axes[0].clear()
+                axes[0].imshow(frame_raw)
+                title = f'Step {step} | Action: {ACTION_NAMES.get(action, action)}'
+                if self.current_lives is not None:
+                    title += f' | Lives: {self.current_lives}'
+                axes[0].set_title(title, fontsize=12)
+                axes[0].axis('off')
+
+                # Show flow field (NOW SYNCHRONIZED - shows current flow!)
+                axes[1].clear()
+                flow_rgb = flow_to_rgb(flow_curr)
+                axes[1].imshow(flow_rgb)
+                axes[1].set_title('Flow Field (Current)', fontsize=12)
+                axes[1].axis('off')
+
+                # Show learning progress
+                if len(self.history['accuracy']) > 10:
+                    axes[2].clear()
+                    recent_acc = self.history['accuracy'][-100:]
+                    axes[2].plot(recent_acc, color='green', linewidth=2)
+                    axes[2].axhline(1/len(valid_actions), color='red', linestyle='--', label='Random')
+                    axes[2].set_ylim([0, 1])
+                    axes[2].set_title(f'Accuracy: {recent_acc[-1]*100:.1f}%', fontsize=12)
+                    axes[2].set_xlabel('Recent Steps')
+                    axes[2].legend()
+                    axes[2].grid(alpha=0.3)
+
+                plt.tight_layout()
+                display.clear_output(wait=True)
+                display.display(fig)
 
             # =================================================================
             # 3. LEARN IMMEDIATELY (Online update!)
