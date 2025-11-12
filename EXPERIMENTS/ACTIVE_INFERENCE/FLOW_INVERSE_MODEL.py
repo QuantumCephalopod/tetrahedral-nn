@@ -52,6 +52,40 @@ print("=" * 70)
 
 
 # ============================================================================
+# VALID ACTIONS PER GAME (Critical for action masking!)
+# ============================================================================
+
+VALID_ACTIONS = {
+    'ALE/Pong-v5': [0, 2, 5],  # NOOP, UP, DOWN
+    'ALE/Breakout-v5': [0, 1, 3, 4],  # NOOP, FIRE, RIGHT, LEFT
+    'ALE/SpaceInvaders-v5': [0, 1, 2, 3, 4, 5],  # NOOP, FIRE, UP, RIGHT, LEFT, DOWN
+    'ALE/MsPacman-v5': [0, 1, 2, 3, 4, 5, 6, 7, 8],  # All 9 actions
+    # Add more games as needed
+}
+
+ACTION_NAMES = {
+    0: 'NOOP',
+    1: 'FIRE',
+    2: 'UP',
+    3: 'RIGHT',
+    4: 'LEFT',
+    5: 'DOWN',
+    6: 'UPRIGHT',
+    7: 'UPLEFT',
+    8: 'DOWNRIGHT',
+    9: 'DOWNLEFT',
+    10: 'UPFIRE',
+    11: 'RIGHTFIRE',
+    12: 'LEFTFIRE',
+    13: 'DOWNFIRE',
+    14: 'UPRIGHTFIRE',
+    15: 'UPLEFTFIRE',
+    16: 'DOWNRIGHTFIRE',
+    17: 'DOWNLEFTFIRE'
+}
+
+
+# ============================================================================
 # OPTICAL FLOW COMPUTATION
 # ============================================================================
 
@@ -277,12 +311,15 @@ class CoupledFlowModel(nn.Module):
         self.forward_model = FlowForwardModel(img_size, latent_dim, n_actions)
         self.inverse_model = FlowInverseModel(img_size, latent_dim, n_actions)
 
-    def compute_losses(self, flow_t, flow_t1, action,
+    def compute_losses(self, flow_t, flow_t1, action, action_mask=None,
                       forward_weight=1.0,
                       inverse_weight=1.0,
                       consistency_weight=0.3):
         """
-        Compute coupled losses.
+        Compute coupled losses with ACTION MASKING.
+
+        Critical: Mask invalid actions so model doesn't get penalized
+        for predicting "UP" when ground truth is "UPFIRE" (functionally identical in Pong).
 
         Returns metrics for tracking harmonic learning.
         """
@@ -292,11 +329,23 @@ class CoupledFlowModel(nn.Module):
 
         # Inverse loss: Can we infer action from flow change?
         action_logits = self.inverse_model(flow_t, flow_t1)
-        loss_inverse = F.cross_entropy(action_logits, action)
+
+        # ===  ACTION MASKING (CRITICAL!) ===
+        # Mask invalid actions to -inf before softmax/loss
+        if action_mask is not None:
+            masked_logits = action_logits.clone()
+            # Expand mask to batch size
+            mask_expanded = action_mask.unsqueeze(0).expand(action_logits.size(0), -1)
+            # Set invalid actions to very negative (will be ~0 after softmax)
+            masked_logits[mask_expanded == 0] = -1e9
+        else:
+            masked_logits = action_logits
+
+        loss_inverse = F.cross_entropy(masked_logits, action)
 
         # Consistency loss: Do models agree?
         with torch.no_grad():
-            inferred_action = action_logits.argmax(dim=-1)
+            inferred_action = masked_logits.argmax(dim=-1)
         pred_flow_consistent = self.forward_model(flow_t, inferred_action)
         loss_consistency = F.mse_loss(pred_flow_consistent, flow_t1)
 
@@ -305,9 +354,9 @@ class CoupledFlowModel(nn.Module):
                      inverse_weight * loss_inverse +
                      consistency_weight * loss_consistency)
 
-        # Metrics
+        # Metrics (also use masked logits for accuracy!)
         with torch.no_grad():
-            accuracy = (action_logits.argmax(dim=-1) == action).float().mean()
+            accuracy = (masked_logits.argmax(dim=-1) == action).float().mean()
             flow_magnitude = torch.sqrt((flow_t1 ** 2).sum(dim=1)).mean()
 
         return {
@@ -375,6 +424,7 @@ class FlowInverseTrainer:
         self.img_size = img_size
         self.batch_size = batch_size
         self.flow_method = flow_method
+        self.env_name = env_name
 
         # Environment
         import gymnasium as gym
@@ -382,6 +432,21 @@ class FlowInverseTrainer:
         self.n_actions = self.env.action_space.n
         print(f"🎮 Environment: {env_name}")
         print(f"   Actions: {self.n_actions}")
+
+        # === ACTION MASKING (CRITICAL!) ===
+        # Create mask for valid actions in this game
+        if env_name in VALID_ACTIONS:
+            valid_actions = VALID_ACTIONS[env_name]
+            self.action_mask = torch.zeros(self.n_actions)
+            self.action_mask[valid_actions] = 1.0
+            print(f"   Valid actions: {valid_actions}")
+            print(f"   Action names: {[ACTION_NAMES.get(a, str(a)) for a in valid_actions]}")
+        else:
+            # No masking if game not in dictionary
+            self.action_mask = torch.ones(self.n_actions)
+            print(f"   ⚠️  No action mask for {env_name} - using all {self.n_actions} actions")
+
+        self.action_mask = self.action_mask.to(self.device)
 
         # Model
         print(f"\n🧠 Creating coupled flow model...")
@@ -498,7 +563,7 @@ class FlowInverseTrainer:
         return episodes_done
 
     def train_step(self):
-        """Train on batch of flow transitions."""
+        """Train on batch of flow transitions WITH ACTION MASKING."""
         if len(self.buffer) < self.batch_size:
             return None
 
@@ -508,8 +573,11 @@ class FlowInverseTrainer:
         actions = actions.to(self.device)
         flows_t1 = flows_t1.to(self.device)
 
-        # Compute losses
-        losses = self.model.compute_losses(flows_t, flows_t1, actions)
+        # Compute losses WITH ACTION MASK!
+        losses = self.model.compute_losses(
+            flows_t, flows_t1, actions,
+            action_mask=self.action_mask
+        )
 
         # Backprop
         self.optimizer.zero_grad()
@@ -520,14 +588,15 @@ class FlowInverseTrainer:
 
         return losses
 
-    def train_loop(self, n_episodes=10, steps_per_episode=50):
-        """Main training loop."""
+    def train_loop(self, n_episodes=10, steps_per_episode=50, viz_every=2):
+        """Main training loop WITH LIVE VISUALIZATION."""
         print("\n" + "="*70)
         print("🌊 FLOW-BASED INVERSE MODEL TRAINING")
         print("="*70)
         print(f"Testing: Harmonic Resonance Hypothesis")
         print(f"Episodes: {n_episodes}")
         print(f"Steps per episode: {steps_per_episode}")
+        print(f"Visualization every {viz_every} episodes")
         print("="*70 + "\n")
 
         for episode in range(n_episodes):
@@ -563,7 +632,96 @@ class FlowInverseTrainer:
                 print(f"   Accuracy: {avg_acc*100:.2f}% (random={100/self.n_actions:.2f}%)")
                 print(f"   Buffer: {len(self.buffer)}")
 
+            # === LIVE VISUALIZATION ===
+            if (episode + 1) % viz_every == 0 and len(self.buffer) >= 4:
+                print(f"\n🎨 Generating visualization (episode {episode+1})...")
+                self._save_live_viz(episode + 1)
+
         print("\n✅ Training complete!\n")
+
+    def _save_live_viz(self, episode_num):
+        """Save live visualization during training."""
+        self.model.eval()
+
+        # Sample 4 transitions
+        flows_t, actions, flows_t1 = self.buffer.sample(4)
+        flows_t_dev = flows_t.to(self.device)
+        flows_t1_dev = flows_t1.to(self.device)
+        actions_dev = actions.to(self.device)
+
+        with torch.no_grad():
+            action_logits = self.model.inverse_model(flows_t_dev, flows_t1_dev)
+            # Apply action mask
+            masked_logits = action_logits.clone()
+            mask_expanded = self.action_mask.unsqueeze(0).expand(action_logits.size(0), -1)
+            masked_logits[mask_expanded == 0] = -1e9
+            pred_actions = masked_logits.argmax(dim=-1)
+            probs = torch.softmax(masked_logits, dim=-1)
+
+        # Get valid actions for this game
+        valid_actions = VALID_ACTIONS.get(self.env_name, list(range(self.n_actions)))
+
+        fig, axes = plt.subplots(4, 4, figsize=(14, 12))
+
+        for i in range(4):
+            # Flow t (as RGB)
+            flow_t_rgb = flow_to_rgb(flows_t[i])
+            axes[i, 0].imshow(flow_t_rgb)
+            axes[i, 0].set_title(f'Flow t\nAction: {ACTION_NAMES.get(actions[i].item(), actions[i].item())}', fontsize=9)
+            axes[i, 0].axis('off')
+
+            # Flow t+1 (as RGB)
+            flow_t1_rgb = flow_to_rgb(flows_t1[i])
+            axes[i, 1].imshow(flow_t1_rgb)
+            axes[i, 1].set_title('Flow t+1', fontsize=9)
+            axes[i, 1].axis('off')
+
+            # Flow change magnitude
+            flow_diff = flows_t1[i] - flows_t[i]
+            flow_diff_mag = torch.sqrt((flow_diff ** 2).sum(dim=0)).numpy()
+            im = axes[i, 2].imshow(flow_diff_mag, cmap='hot')
+            axes[i, 2].set_title('Flow change', fontsize=9)
+            axes[i, 2].axis('off')
+
+            # Action prediction (only show valid actions!)
+            true_action = actions[i].item()
+            pred_action = pred_actions[i].item()
+
+            # Only show valid actions in bar chart
+            valid_probs = probs[i, valid_actions].cpu().numpy()
+            valid_names = [ACTION_NAMES.get(a, str(a)) for a in valid_actions]
+
+            bars = axes[i, 3].bar(range(len(valid_actions)), valid_probs)
+
+            # Color code bars
+            if true_action in valid_actions:
+                true_idx = valid_actions.index(true_action)
+                bars[true_idx].set_color('green')
+            if pred_action in valid_actions and pred_action != true_action:
+                pred_idx = valid_actions.index(pred_action)
+                bars[pred_idx].set_color('red')
+
+            axes[i, 3].set_xticks(range(len(valid_actions)))
+            axes[i, 3].set_xticklabels(valid_names, rotation=45, ha='right', fontsize=7)
+            axes[i, 3].set_ylim([0, 1])
+            axes[i, 3].axhline(1/len(valid_actions), color='gray', linestyle='--', alpha=0.5)
+
+            correct = "✓" if pred_action == true_action else "✗"
+            axes[i, 3].set_title(
+                f'{correct} True: {ACTION_NAMES.get(true_action, true_action)}\nPred: {ACTION_NAMES.get(pred_action, pred_action)}',
+                fontsize=8,
+                color='green' if pred_action == true_action else 'red'
+            )
+
+        plt.suptitle(f'Episode {episode_num} | Step {self.step_count} | {self.env_name}', fontsize=12, fontweight='bold')
+        plt.tight_layout()
+
+        filename = f'flow_live_ep{episode_num:03d}.png'
+        plt.savefig(filename, dpi=120, bbox_inches='tight')
+        print(f"   ✅ Saved: {filename}")
+        plt.close()
+
+        self.model.train()
 
     def visualize_flow_predictions(self, n_samples=4):
         """
