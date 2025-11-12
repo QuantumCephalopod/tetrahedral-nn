@@ -374,15 +374,39 @@ class CoupledFlowModel(nn.Module):
 # ============================================================================
 
 class FlowExperienceBuffer:
-    """Store (flow_t, action, flow_t+1) transitions."""
+    """
+    Store (flow_t, action, flow_t+1) transitions.
+
+    Supports both random sampling (standard RL) and sequential sampling
+    (preserves temporal coherence for flow-based learning).
+    """
     def __init__(self, capacity=10000):
         self.buffer = deque(maxlen=capacity)
 
     def add(self, flow_t, action, flow_t1):
         self.buffer.append((flow_t, action, flow_t1))
 
-    def sample(self, batch_size):
-        batch = random.sample(self.buffer, min(batch_size, len(self.buffer)))
+    def sample(self, batch_size, sequential=False):
+        """
+        Sample batch from buffer.
+
+        Args:
+            batch_size: Number of transitions to sample
+            sequential: If True, sample consecutive transitions (preserves temporal coherence)
+                       If False, sample randomly (standard experience replay)
+
+        Returns:
+            flows_t, actions, flows_t1
+        """
+        if sequential:
+            # Sample a starting point, then take consecutive transitions
+            # This preserves temporal structure and causal relationships!
+            max_start = max(0, len(self.buffer) - batch_size)
+            start_idx = random.randint(0, max_start) if max_start > 0 else 0
+            batch = list(self.buffer)[start_idx:start_idx + batch_size]
+        else:
+            # Random sampling (destroys temporal coherence but prevents overfitting)
+            batch = random.sample(self.buffer, min(batch_size, len(self.buffer)))
 
         flows_t = torch.stack([b[0] for b in batch])
         actions = torch.tensor([b[1] for b in batch], dtype=torch.long)
@@ -413,7 +437,8 @@ class FlowInverseTrainer:
                  batch_size=16,
                  device=None,
                  flow_method='farneback',
-                 frameskip=10):
+                 frameskip=10,
+                 sequential_sampling=True):
 
         if device is None:
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -426,6 +451,7 @@ class FlowInverseTrainer:
         self.batch_size = batch_size
         self.flow_method = flow_method
         self.env_name = env_name
+        self.sequential_sampling = sequential_sampling
 
         # Temporal sampling (frameskip)
         self.frameskip = frameskip
@@ -447,6 +473,12 @@ class FlowInverseTrainer:
 
         if frameskip == 10:
             print(f"   ✓ φ-aligned with fast memory field (τ₁ = 10 steps)")
+
+        # Temporal coherence
+        if sequential_sampling:
+            print(f"🔗 Sequential sampling: ENABLED (preserves temporal coherence)")
+        else:
+            print(f"🎲 Random sampling: ENABLED (standard experience replay)")
 
         # Environment
         import gymnasium as gym
@@ -796,12 +828,20 @@ class FlowInverseTrainer:
         return episodes_done
 
     def train_step(self):
-        """Train on batch of flow transitions WITH ACTION MASKING."""
+        """
+        Train on batch of flow transitions WITH ACTION MASKING.
+
+        Uses sequential sampling if enabled (preserves temporal coherence),
+        otherwise uses random sampling (standard experience replay).
+        """
         if len(self.buffer) < self.batch_size:
             return None
 
-        # Sample
-        flows_t, actions, flows_t1 = self.buffer.sample(self.batch_size)
+        # Sample (sequential preserves temporal structure!)
+        flows_t, actions, flows_t1 = self.buffer.sample(
+            self.batch_size,
+            sequential=self.sequential_sampling
+        )
         flows_t = flows_t.to(self.device)
         actions = actions.to(self.device)
         flows_t1 = flows_t1.to(self.device)
@@ -1264,6 +1304,13 @@ print("   # Theta (6 Hz) - φ-aligned with memory field")
 print("   trainer_theta = FlowInverseTrainer(frameskip=10)")
 print("   # Saccade (4 Hz) - human visual sampling")
 print("   trainer_saccade = FlowInverseTrainer(frameskip=15)")
+print()
+print("7️⃣  Sequential vs Random sampling")
+print("   # Sequential (preserves temporal coherence) - DEFAULT")
+print("   trainer_seq = FlowInverseTrainer(sequential_sampling=True)")
+print("   # Random (standard RL experience replay)")
+print("   trainer_rand = FlowInverseTrainer(sequential_sampling=False)")
+print("   # Compare: Does temporal coherence improve flow learning?")
 print()
 print("="*70)
 print("\n🧪 TESTING: Harmonic Resonance Hypothesis")
