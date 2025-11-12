@@ -523,16 +523,19 @@ class FlowInverseTrainer:
         return tensor
 
     def collect_experience(self, n_steps=100):
-        """Collect flow-based transitions."""
+        """Collect flow-based transitions (ONLY VALID ACTIONS!)."""
         print(f"\n📦 Collecting {n_steps} flow transitions...")
+
+        # Get valid actions for this game
+        valid_actions = VALID_ACTIONS.get(self.env_name, list(range(self.n_actions)))
 
         frame_raw, _ = self.env.reset()
         frame_prev = self.preprocess_frame(frame_raw)
         episodes_done = 0
 
         for step in range(n_steps):
-            # Random action for now (could use active inference later!)
-            action = random.randint(0, self.n_actions - 1)
+            # Random action from VALID set only!
+            action = random.choice(valid_actions)
 
             # Step environment
             frame_raw, reward, terminated, truncated, info = self.env.step(action)
@@ -541,8 +544,8 @@ class FlowInverseTrainer:
             # Compute flows
             flow_prev = compute_optical_flow(frame_prev, frame_curr, method=self.flow_method)
 
-            # Next frame for next flow
-            action_next = random.randint(0, self.n_actions - 1)
+            # Next frame for next flow (also from valid actions!)
+            action_next = random.choice(valid_actions)
             frame_raw_next, _, term_next, trunc_next, _ = self.env.step(action_next)
             frame_next = self.preprocess_frame(frame_raw_next)
             flow_curr = compute_optical_flow(frame_curr, frame_next, method=self.flow_method)
