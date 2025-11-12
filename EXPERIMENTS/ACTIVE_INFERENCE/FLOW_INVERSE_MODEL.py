@@ -646,8 +646,9 @@ class FlowInverseTrainer:
         """Save live visualization during training."""
         self.model.eval()
 
-        # Sample 4 transitions
-        flows_t, actions, flows_t1 = self.buffer.sample(4)
+        # Sample batch_size transitions (same as training to avoid tensor mismatch!)
+        n_samples = min(self.batch_size, len(self.buffer))
+        flows_t, actions, flows_t1 = self.buffer.sample(n_samples)
         flows_t_dev = flows_t.to(self.device)
         flows_t1_dev = flows_t1.to(self.device)
         actions_dev = actions.to(self.device)
@@ -664,9 +665,13 @@ class FlowInverseTrainer:
         # Get valid actions for this game
         valid_actions = VALID_ACTIONS.get(self.env_name, list(range(self.n_actions)))
 
-        fig, axes = plt.subplots(4, 4, figsize=(14, 12))
+        # Show first 4 samples for visualization
+        n_viz = min(4, n_samples)
+        fig, axes = plt.subplots(n_viz, 4, figsize=(14, 3*n_viz))
+        if n_viz == 1:
+            axes = axes.reshape(1, -1)
 
-        for i in range(4):
+        for i in range(n_viz):
             # Flow t (as RGB)
             flow_t_rgb = flow_to_rgb(flows_t[i])
             axes[i, 0].imshow(flow_t_rgb)
