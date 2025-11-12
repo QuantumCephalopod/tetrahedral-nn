@@ -1185,10 +1185,15 @@ class FlowInverseTrainer:
                 color='green' if pred_action == true_action else 'red'
             )
 
-        plt.suptitle(f'Episode {episode_num} | Step {self.step_count} | {self.env_name}', fontsize=12, fontweight='bold')
+        plt.suptitle(f'Step {self.step_count} | {self.env_name}', fontsize=12, fontweight='bold')
         plt.tight_layout()
 
-        filename = f'flow_live_ep{episode_num:03d}.png'
+        # Handle both integer episode numbers and string labels
+        if isinstance(episode_num, int):
+            filename = f'flow_live_ep{episode_num:03d}.png'
+        else:
+            filename = f'flow_live_{episode_num}.png'
+
         plt.savefig(filename, dpi=120, bbox_inches='tight')
         print(f"   ✅ Saved: {filename}")
         plt.close()
