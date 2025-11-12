@@ -493,7 +493,7 @@ class CoupledFlowModel(nn.Module):
             'forward': loss_forward.item(),
             'inverse': loss_inverse.item(),
             'consistency': loss_consistency.item(),
-            'accuracy': accuracy.item(),
+            'accuracy': accuracy,  # Already converted to float above
             'flow_magnitude': flow_magnitude.item()
         }
 
