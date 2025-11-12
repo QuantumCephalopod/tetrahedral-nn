@@ -522,9 +522,100 @@ class FlowInverseTrainer:
         tensor = torch.from_numpy(np.array(img, dtype=np.float32) / 255.0).permute(2, 0, 1)
         return tensor
 
-    def collect_experience(self, n_steps=100):
-        """Collect flow-based transitions (ONLY VALID ACTIONS!)."""
-        print(f"\n📦 Collecting {n_steps} flow transitions...")
+    def select_action_active_inference(self, flow_current, temperature=1.0, beta=None):
+        """
+        🌀 ACTIVE INFERENCE POLICY: Closes the strange loop!
+
+        For each valid action:
+        1. Use forward model to predict: "What flow will this action create?"
+        2. Compute expected free energy = Uncertainty - β × Entropy
+        3. Select action that minimizes free energy (maximizes learning!)
+
+        This makes the model ACT based on what it learned, not just infer.
+        The strange loop closes: perception → understanding → action → new perception
+
+        Args:
+            flow_current: Current flow field (2, H, W)
+            temperature: Softmax temperature (higher = more exploration)
+            beta: Exploration coefficient (higher = seek diverse outcomes)
+
+        Returns:
+            selected_action: int
+            info: dict with free energies, probs, etc.
+        """
+        if beta is None:
+            # Default β: moderate exploration
+            # Could be curriculum-aware: high early, low later
+            beta = 0.05
+
+        valid_actions = VALID_ACTIONS.get(self.env_name, list(range(self.n_actions)))
+
+        free_energies = []
+        uncertainties = []
+        entropies = []
+
+        self.model.eval()
+        with torch.no_grad():
+            flow_batch = flow_current.unsqueeze(0).to(self.device)  # (1, 2, H, W)
+
+            for action in valid_actions:
+                # FORWARD MODEL: Predict "what will happen if I do this?"
+                action_tensor = torch.tensor([action], dtype=torch.long).to(self.device)
+                pred_flow = self.model.forward_model(flow_batch, action_tensor)  # (1, 2, H, W)
+
+                # Uncertainty: How confident is the model?
+                # High variance = uncertain prediction
+                uncertainty = pred_flow.var().item()
+
+                # Entropy: How diverse/interesting is predicted outcome?
+                # For continuous flow, use variance as proxy for entropy
+                entropy = pred_flow.std().item()  # Could also use variance
+
+                # Expected Free Energy (Friston 2010)
+                # Low free energy = good action (either certain OR diverse, depending on β)
+                free_energy = uncertainty - beta * entropy
+
+                free_energies.append(free_energy)
+                uncertainties.append(uncertainty)
+                entropies.append(entropy)
+
+        self.model.train()
+
+        # Convert to tensor
+        free_energies_tensor = torch.tensor(free_energies)
+
+        # Select action: minimize free energy (with temperature for stochasticity)
+        # Negative because we want LOW free energy
+        logits = -free_energies_tensor / temperature
+        probs = F.softmax(logits, dim=0)
+
+        # Sample action stochastically (preserves exploration)
+        action_idx = torch.multinomial(probs, 1).item()
+        selected_action = valid_actions[action_idx]
+
+        return selected_action, {
+            'free_energies': free_energies,
+            'uncertainties': uncertainties,
+            'entropies': entropies,
+            'action_probs': probs.cpu().numpy(),
+            'selected_idx': action_idx,
+            'beta': beta,
+            'temperature': temperature
+        }
+
+    def collect_experience(self, n_steps=100, use_active_inference=False, policy_temperature=1.0, beta=None):
+        """
+        Collect flow-based transitions.
+
+        Args:
+            n_steps: Number of transitions to collect
+            use_active_inference: If True, use learned model to select actions (CLOSE THE LOOP!)
+                                  If False, use random actions (baseline)
+            policy_temperature: Softmax temperature for action selection
+            beta: Exploration coefficient for free energy
+        """
+        policy_str = "🌀 ACTIVE INFERENCE" if use_active_inference else "🎲 RANDOM"
+        print(f"\n📦 Collecting {n_steps} flow transitions ({policy_str})...")
 
         # Get valid actions for this game
         valid_actions = VALID_ACTIONS.get(self.env_name, list(range(self.n_actions)))
@@ -533,9 +624,12 @@ class FlowInverseTrainer:
         frame_prev = self.preprocess_frame(frame_raw)
         episodes_done = 0
 
+        # Track policy usage
+        policy_stats = {'active_inference': 0, 'random': 0}
+
         for step in range(n_steps):
-            # Random action from VALID set only!
-            action = random.choice(valid_actions)
+            # Get current action (need one frame first for flow)
+            action = random.choice(valid_actions)  # First action is always random
 
             # Step environment
             frame_raw, reward, terminated, truncated, info = self.env.step(action)
@@ -544,14 +638,28 @@ class FlowInverseTrainer:
             # Compute flows
             flow_prev = compute_optical_flow(frame_prev, frame_curr, method=self.flow_method)
 
-            # Next frame for next flow (also from valid actions!)
-            action_next = random.choice(valid_actions)
+            # ===  ACTIVE INFERENCE POLICY: SELECT NEXT ACTION BASED ON FLOW ===
+            if use_active_inference and len(self.buffer) > self.batch_size:
+                # Use learned model to select action!
+                action_next, policy_info = self.select_action_active_inference(
+                    flow_prev,
+                    temperature=policy_temperature,
+                    beta=beta
+                )
+                policy_stats['active_inference'] += 1
+            else:
+                # Random baseline (or not enough data yet)
+                action_next = random.choice(valid_actions)
+                policy_stats['random'] += 1
+
+            # Execute selected action
             frame_raw_next, _, term_next, trunc_next, _ = self.env.step(action_next)
             frame_next = self.preprocess_frame(frame_raw_next)
             flow_curr = compute_optical_flow(frame_curr, frame_next, method=self.flow_method)
 
-            # Store: (flow_prev, action, flow_curr)
-            self.buffer.add(flow_prev, action, flow_curr)
+            # Store: (flow_prev, action_next, flow_curr)
+            # This is what action_next produced!
+            self.buffer.add(flow_prev, action_next, flow_curr)
 
             # Update
             frame_prev = frame_next
@@ -563,6 +671,9 @@ class FlowInverseTrainer:
 
         print(f"   ✓ Collected {len(self.buffer)} flow transitions")
         print(f"   ✓ Episodes: {episodes_done}")
+        if use_active_inference:
+            active_pct = 100 * policy_stats['active_inference'] / n_steps
+            print(f"   ✓ Active inference used: {active_pct:.1f}% of steps")
         return episodes_done
 
     def train_step(self):
@@ -591,20 +702,47 @@ class FlowInverseTrainer:
 
         return losses
 
-    def train_loop(self, n_episodes=10, steps_per_episode=50, viz_every=2):
-        """Main training loop WITH LIVE VISUALIZATION."""
+    def train_loop(self, n_episodes=10, steps_per_episode=50, viz_every=2,
+                   use_active_inference=False, policy_temperature=1.0, beta=None,
+                   active_inference_after=0):
+        """
+        Main training loop WITH LIVE VISUALIZATION.
+
+        Args:
+            n_episodes: Number of training episodes
+            steps_per_episode: Training steps per episode
+            viz_every: Visualize every N episodes
+            use_active_inference: If True, use active inference policy to select actions
+            policy_temperature: Temperature for action selection softmax
+            beta: Exploration coefficient for free energy
+            active_inference_after: Start using active inference after N episodes (warm start)
+        """
+        policy_mode = "🌀 ACTIVE INFERENCE" if use_active_inference else "🎲 RANDOM BASELINE"
         print("\n" + "="*70)
-        print("🌊 FLOW-BASED INVERSE MODEL TRAINING")
+        print(f"🌊 FLOW-BASED INVERSE MODEL TRAINING ({policy_mode})")
         print("="*70)
         print(f"Testing: Harmonic Resonance Hypothesis")
         print(f"Episodes: {n_episodes}")
         print(f"Steps per episode: {steps_per_episode}")
         print(f"Visualization every {viz_every} episodes")
+        if use_active_inference:
+            print(f"Active inference temperature: {policy_temperature}")
+            print(f"Exploration β: {beta if beta else 'auto (0.05)'}")
+            if active_inference_after > 0:
+                print(f"Warm start: Active inference after episode {active_inference_after}")
         print("="*70 + "\n")
 
         for episode in range(n_episodes):
+            # Determine if using active inference this episode
+            use_active_this_ep = use_active_inference and (episode >= active_inference_after)
+
             # Collect
-            episodes_done = self.collect_experience(n_steps=100)
+            episodes_done = self.collect_experience(
+                n_steps=100,
+                use_active_inference=use_active_this_ep,
+                policy_temperature=policy_temperature,
+                beta=beta
+            )
             self.episode_count += episodes_done
 
             # Train
@@ -817,6 +955,98 @@ class FlowInverseTrainer:
 
         self.model.train()
 
+    def visualize_active_inference_policy(self, n_samples=4, temperature=1.0, beta=None):
+        """
+        Visualize active inference policy in action.
+
+        Shows:
+        - Current flow field
+        - Predicted flows for each action
+        - Free energies (uncertainty vs entropy trade-off)
+        - Action probabilities
+        - Selected action
+
+        This reveals HOW the model decides what to do!
+        """
+        if len(self.buffer) < n_samples:
+            print("Not enough samples")
+            return
+
+        flows_t, _, _ = self.buffer.sample(n_samples)
+        valid_actions = VALID_ACTIONS.get(self.env_name, list(range(self.n_actions)))
+
+        fig, axes = plt.subplots(n_samples, 4, figsize=(16, 4*n_samples))
+        if n_samples == 1:
+            axes = axes.reshape(1, -1)
+
+        for i in range(n_samples):
+            flow = flows_t[i]
+
+            # Use active inference to select action
+            selected_action, policy_info = self.select_action_active_inference(
+                flow, temperature=temperature, beta=beta
+            )
+
+            # Current flow
+            flow_rgb = flow_to_rgb(flow)
+            axes[i, 0].imshow(flow_rgb)
+            axes[i, 0].set_title(f'Current Flow Field\n(Sample {i+1})', fontsize=10)
+            axes[i, 0].axis('off')
+
+            # Free energies for each action
+            free_energies = policy_info['free_energies']
+            action_names = [ACTION_NAMES.get(a, str(a)) for a in valid_actions]
+
+            bars = axes[i, 1].bar(range(len(valid_actions)), free_energies)
+            selected_idx = policy_info['selected_idx']
+            bars[selected_idx].set_color('green')
+
+            axes[i, 1].set_xticks(range(len(valid_actions)))
+            axes[i, 1].set_xticklabels(action_names, rotation=45, ha='right', fontsize=8)
+            axes[i, 1].set_ylabel('Expected Free Energy')
+            axes[i, 1].axhline(0, color='black', linestyle='-', linewidth=0.5)
+            axes[i, 1].set_title('Free Energy per Action\n(Lower = Better)', fontsize=10)
+            axes[i, 1].grid(alpha=0.3)
+
+            # Uncertainty vs Entropy
+            uncertainties = policy_info['uncertainties']
+            entropies = policy_info['entropies']
+
+            axes[i, 2].scatter(uncertainties, entropies, s=100, alpha=0.6)
+            axes[i, 2].scatter([uncertainties[selected_idx]], [entropies[selected_idx]],
+                             s=200, color='green', marker='*', edgecolors='black', linewidths=2,
+                             label=f'Selected: {action_names[selected_idx]}')
+
+            for j, action_name in enumerate(action_names):
+                axes[i, 2].annotate(action_name, (uncertainties[j], entropies[j]),
+                                   fontsize=7, ha='center', va='bottom')
+
+            axes[i, 2].set_xlabel('Uncertainty (Variance)')
+            axes[i, 2].set_ylabel('Entropy (Diversity)')
+            axes[i, 2].set_title(f'Epistemic Trade-off\n(β={policy_info["beta"]:.3f})', fontsize=10)
+            axes[i, 2].legend(fontsize=8)
+            axes[i, 2].grid(alpha=0.3)
+
+            # Action probabilities
+            action_probs = policy_info['action_probs']
+            bars = axes[i, 3].bar(range(len(valid_actions)), action_probs)
+            bars[selected_idx].set_color('green')
+
+            axes[i, 3].set_xticks(range(len(valid_actions)))
+            axes[i, 3].set_xticklabels(action_names, rotation=45, ha='right', fontsize=8)
+            axes[i, 3].set_ylabel('Probability')
+            axes[i, 3].set_ylim([0, 1])
+            axes[i, 3].axhline(1/len(valid_actions), color='gray', linestyle='--', alpha=0.5)
+            axes[i, 3].set_title(f'Action Distribution\n(T={policy_info["temperature"]:.1f})', fontsize=10)
+            axes[i, 3].grid(alpha=0.3)
+
+        plt.suptitle(f'🌀 Active Inference Policy Visualization | {self.env_name}',
+                    fontsize=14, fontweight='bold')
+        plt.tight_layout()
+        plt.savefig('flow_active_inference_policy.png', dpi=150, bbox_inches='tight')
+        print("✅ Saved: flow_active_inference_policy.png")
+        plt.show()
+
     def plot_training(self):
         """Plot training curves."""
         fig, axes = plt.subplots(2, 2, figsize=(12, 8))
@@ -867,14 +1097,36 @@ class FlowInverseTrainer:
 print("\n" + "="*70)
 print("🌊 FLOW-BASED TETRAHEDRAL INVERSE MODEL - READY")
 print("="*70)
-print("\nUsage:")
-print("  trainer = FlowInverseTrainer(env_name='ALE/Pong-v5')")
-print("  trainer.train_loop(n_episodes=10)")
-print("  trainer.visualize_flow_predictions()")
-print("  trainer.plot_training()")
-print("\nTesting: Harmonic Resonance Hypothesis")
-print("  - Do actions create characteristic flow frequencies?")
-print("  - Does tetrahedral structure learn harmonics?")
-print("  - Does it generalize beyond training?")
+print("\n📚 USAGE EXAMPLES:\n")
+print("1️⃣  Random Baseline (control)")
+print("   trainer = FlowInverseTrainer(env_name='ALE/Pong-v5')")
+print("   trainer.train_loop(n_episodes=10, use_active_inference=False)")
+print("   trainer.plot_training()")
+print()
+print("2️⃣  Active Inference (🌀 CLOSE THE STRANGE LOOP!)")
+print("   trainer = FlowInverseTrainer(env_name='ALE/Pong-v5')")
+print("   # Train with random first, then switch to active inference")
+print("   trainer.train_loop(n_episodes=10, use_active_inference=True,")
+print("                      active_inference_after=3, policy_temperature=1.0)")
+print("   trainer.visualize_active_inference_policy()")
+print()
+print("3️⃣  Visualize what model learned")
+print("   trainer.visualize_flow_predictions()")
+print("   trainer.visualize_active_inference_policy()")
+print()
+print("4️⃣  Curriculum-aware β (developmental exploration)")
+print("   # High β: Seek diverse outcomes (early exploration)")
+print("   trainer.train_loop(n_episodes=5, use_active_inference=True, beta=0.1)")
+print("   # Low β: Seek certain outcomes (later exploitation)")
+print("   trainer.train_loop(n_episodes=5, use_active_inference=True, beta=0.01)")
+print()
+print("="*70)
+print("\n🧪 TESTING: Harmonic Resonance Hypothesis")
+print("  ✓ Do actions create characteristic flow frequencies?")
+print("  ✓ Does tetrahedral structure learn harmonics?")
+print("  ✓ Does active inference improve learning efficiency?")
+print("  ✓ Can model ACT intelligently based on learned flow patterns?")
+print("\n🌀 THE STRANGE LOOP CLOSES:")
+print("   Perception → Model → Action → Effect → New Perception → ...")
 print("\n🔬 Let's find out!")
 print("="*70 + "\n")
