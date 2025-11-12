@@ -675,8 +675,13 @@ class FlowInverseTrainer:
         self.episode_count = 0
         self.history = {
             'forward': [], 'inverse': [], 'consistency': [],
-            'total': [], 'accuracy': [], 'flow_magnitude': []
+            'total': [], 'accuracy': [], 'flow_magnitude': [],
+            'entropy': [], 'pain': []  # Entropy = lives remaining, Pain = weighted loss
         }
+
+        # Entropy tracking (lives/health as measure of distance to termination)
+        self.current_lives = None  # Will be initialized from environment
+        self.max_lives = None  # Maximum lives (for normalization)
 
         # Checkpoint directory
         self.checkpoint_dir = Path("checkpoints")
@@ -982,6 +987,46 @@ class FlowInverseTrainer:
 
         return losses
 
+    def calculate_pain(self, prediction_error, lives=None):
+        """
+        Calculate PAIN = prediction error weighted by proximity to termination.
+
+        Pain isn't arbitrary. It's the natural signal of entropy increasing.
+
+        Pain = (Prediction Error) × (1 / Lives Remaining)
+
+        When you have many lives: Same error hurts less (far from termination)
+        When you have few lives: Same error hurts MORE (near termination)
+
+        This creates natural risk aversion when vulnerable - not programmed,
+        but EMERGENT from the free energy gradient.
+
+        Args:
+            prediction_error: The base prediction error (surprise)
+            lives: Current lives remaining (if None, uses self.current_lives)
+
+        Returns:
+            pain: Error weighted by proximity to death (termination)
+        """
+        if lives is None:
+            lives = self.current_lives
+
+        if lives is None:
+            # No entropy tracking yet, return unweighted error
+            return prediction_error
+
+        # Pain scales inversely with lives remaining
+        # More lives = less pain per error (safe space, temporal buffer)
+        # Fewer lives = more pain per error (approaching termination)
+        pain_multiplier = 1.0 / (float(lives) + 0.1)  # Small epsilon to avoid div by zero
+
+        if isinstance(prediction_error, torch.Tensor):
+            pain = prediction_error * pain_multiplier
+        else:
+            pain = prediction_error * pain_multiplier
+
+        return pain
+
     def train_loop_online(self, n_steps=500, viz_every=100, save_every=0,
                          policy_temperature=1.0, beta=None, show_gameplay=True):
         """
@@ -1011,8 +1056,19 @@ class FlowInverseTrainer:
 
         # Initialize
         valid_actions = VALID_ACTIONS.get(self.env_name, list(range(self.n_actions)))
-        frame_raw, _ = self.env.reset()
+        frame_raw, info = self.env.reset()
         frame_prev = self.preprocess_frame(frame_raw)
+
+        # Initialize entropy tracking (lives = measure of distance to termination)
+        self.current_lives = info.get('lives', None)
+        if self.current_lives is not None:
+            if self.max_lives is None:
+                self.max_lives = self.current_lives
+            print(f"💀 Entropy tracking: ENABLED (Lives: {self.current_lives}/{self.max_lives})")
+            print(f"   Pain = Prediction Error × (1 / Lives)")
+            print(f"   → Natural risk aversion when vulnerable")
+        else:
+            print(f"⚠️  Entropy tracking: DISABLED (no lives in info dict)")
 
         episodes_done = 0
         step = 0
@@ -1060,11 +1116,18 @@ class FlowInverseTrainer:
             for _ in range(self.frameskip):
                 frame_raw, reward, terminated, truncated, info = self.env.step(action)
 
+                # Update entropy (lives remaining = distance to termination)
+                if 'lives' in info:
+                    self.current_lives = info['lives']
+
                 # 🎬 SHOW IT LIVE!
                 if show_gameplay and step % 2 == 0:  # Every other step (30 Hz display)
                     axes[0].clear()
                     axes[0].imshow(frame_raw)
-                    axes[0].set_title(f'Step {step} | Action: {ACTION_NAMES.get(action, action)}', fontsize=12)
+                    title = f'Step {step} | Action: {ACTION_NAMES.get(action, action)}'
+                    if self.current_lives is not None:
+                        title += f' | Lives: {self.current_lives}'
+                    axes[0].set_title(title, fontsize=12)
                     axes[0].axis('off')
 
                     # Show flow field
@@ -1113,16 +1176,22 @@ class FlowInverseTrainer:
                 actions = torch.tensor([action], dtype=torch.long).to(self.device)
                 flows_t1 = flow_curr.unsqueeze(0).to(self.device)
 
-                # Compute loss
+                # Compute base losses (prediction errors = surprise)
                 losses = self.model.compute_losses(
                     flows_t, flows_t1, actions,
                     action_mask=self.action_mask,
                     effect_based=self.effect_based_learning
                 )
 
-                # Update weights IMMEDIATELY
+                # Calculate PAIN (entropy-weighted loss)
+                # Pain = Error × (1 / Lives)
+                # Same error hurts more when vulnerable (few lives left)
+                base_loss = losses['total']
+                pain_weighted_loss = self.calculate_pain(base_loss, lives=self.current_lives)
+
+                # Update weights IMMEDIATELY (using pain-weighted loss)
                 self.optimizer.zero_grad()
-                losses['total'].backward()
+                pain_weighted_loss.backward()
                 self.optimizer.step()
 
                 # Track metrics
@@ -1130,13 +1199,21 @@ class FlowInverseTrainer:
                     if key in losses:
                         self.history[key].append(losses[key] if isinstance(losses[key], float) else losses[key].item())
 
+                # Track entropy and pain
+                if self.current_lives is not None:
+                    self.history['entropy'].append(self.current_lives)
+                    self.history['pain'].append(pain_weighted_loss.item())
+
                 # Log (less frequent now that we're watching!)
                 if step % 50 == 0:
-                    print(f"Step {step:4d} | "
-                          f"Fwd: {losses['forward']:.4f} | "
-                          f"Inv: {losses['inverse']:.4f} | "
-                          f"Acc: {losses['accuracy']*100:.1f}% | "
-                          f"Eps: {episodes_done}")
+                    log_msg = (f"Step {step:4d} | "
+                              f"Fwd: {losses['forward']:.4f} | "
+                              f"Inv: {losses['inverse']:.4f} | "
+                              f"Acc: {losses['accuracy']*100:.1f}% | "
+                              f"Eps: {episodes_done}")
+                    if self.current_lives is not None:
+                        log_msg += f" | Lives: {self.current_lives} | Pain: {pain_weighted_loss.item():.4f}"
+                    print(log_msg)
 
             # =================================================================
             # 4. STORE (for temporal context in next updates)
@@ -1155,13 +1232,20 @@ class FlowInverseTrainer:
 
             # Reset if episode ended
             if terminated or truncated:
-                frame_raw, _ = self.env.reset()
+                frame_raw, info = self.env.reset()
                 frame_prev = self.preprocess_frame(frame_raw)
+
+                # Reset entropy tracking for new episode
+                if 'lives' in info:
+                    self.current_lives = info['lives']
 
                 # Bootstrap next episode
                 action = random.choice(valid_actions)
                 for _ in range(self.frameskip):
                     frame_raw, reward, terminated, truncated, info = self.env.step(action)
+                    # Update lives during bootstrap too
+                    if 'lives' in info:
+                        self.current_lives = info['lives']
                     if terminated or truncated:
                         break
                 frame_curr = self.preprocess_frame(frame_raw)
