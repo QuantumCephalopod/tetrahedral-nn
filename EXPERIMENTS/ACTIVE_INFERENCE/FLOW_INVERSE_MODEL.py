@@ -89,7 +89,7 @@ ACTION_NAMES = {
 # OPTICAL FLOW COMPUTATION
 # ============================================================================
 
-def compute_optical_flow(frame1, frame2, method='farneback'):
+def compute_optical_flow(frame1, frame2, method='farneback', target_size=None, add_saccade=False):
     """
     Compute optical flow between two frames.
 
@@ -98,6 +98,12 @@ def compute_optical_flow(frame1, frame2, method='farneback'):
     - Channel 1: vertical velocity (flow_y)
 
     This is the FUNDAMENTAL PRIMITIVE - movement itself.
+
+    Args:
+        frame1, frame2: Input frames (torch tensors or numpy arrays)
+        method: Flow computation method ('farneback' or 'simple')
+        target_size: If provided, downsample flow to this size. Otherwise keep native resolution.
+        add_saccade: If True, adds micro-jitter (artificial saccades) to prevent static blindness
     """
     # Convert to grayscale numpy arrays
     if torch.is_tensor(frame1):
@@ -106,6 +112,16 @@ def compute_optical_flow(frame1, frame2, method='farneback'):
     else:
         f1 = (frame1 * 255).astype(np.uint8)
         f2 = (frame2 * 255).astype(np.uint8)
+
+    # ARTIFICIAL SACCADES: Add micro-jitter to prevent static blindness
+    # Mimics biological microsaccades (1-2 Hz, tiny movements)
+    if add_saccade:
+        # Random jitter: 1-3 pixels in x and y
+        dx = np.random.randint(-2, 3)
+        dy = np.random.randint(-2, 3)
+        # Translate frame2 slightly (simulates eye movement)
+        M = np.float32([[1, 0, dx], [0, 1, dy]])
+        f2 = cv2.warpAffine(f2, M, (f2.shape[1], f2.shape[0]))
 
     # Convert to grayscale
     if len(f1.shape) == 3:
@@ -117,6 +133,7 @@ def compute_optical_flow(frame1, frame2, method='farneback'):
 
     if method == 'farneback':
         # Dense optical flow (Farneback method)
+        # Computed at NATIVE resolution (not downsampled!)
         flow = cv2.calcOpticalFlowFarneback(
             gray1, gray2,
             None,
@@ -135,6 +152,15 @@ def compute_optical_flow(frame1, frame2, method='farneback'):
 
     # Convert to torch tensor (2, H, W)
     flow_tensor = torch.from_numpy(flow).permute(2, 0, 1).float()
+
+    # Downsample if target size specified (for model input)
+    if target_size is not None and (flow_tensor.shape[1] != target_size or flow_tensor.shape[2] != target_size):
+        flow_tensor = torch.nn.functional.interpolate(
+            flow_tensor.unsqueeze(0),
+            size=(target_size, target_size),
+            mode='bilinear',
+            align_corners=False
+        ).squeeze(0)
 
     return flow_tensor
 
@@ -314,12 +340,18 @@ class CoupledFlowModel(nn.Module):
     def compute_losses(self, flow_t, flow_t1, action, action_mask=None,
                       forward_weight=1.0,
                       inverse_weight=1.0,
-                      consistency_weight=0.3):
+                      consistency_weight=0.3,
+                      effect_based=False):
         """
         Compute coupled losses with ACTION MASKING.
 
         Critical: Mask invalid actions so model doesn't get penalized
         for predicting "UP" when ground truth is "UPFIRE" (functionally identical in Pong).
+
+        Args:
+            effect_based: If True, learns from EFFECTS not labels.
+                         "UP at border" = "NOOP at border" because same flow result.
+                         This is how nature actually works.
 
         Returns metrics for tracking harmonic learning.
         """
@@ -327,25 +359,86 @@ class CoupledFlowModel(nn.Module):
         pred_flow_t1 = self.forward_model(flow_t, action)
         loss_forward = F.mse_loss(pred_flow_t1, flow_t1)
 
-        # Inverse loss: Can we infer action from flow change?
-        action_logits = self.inverse_model(flow_t, flow_t1)
+        if effect_based:
+            # ===  EFFECT-BASED LEARNING (NEW!) ===
+            # Don't care about action labels. Care about EFFECTS.
+            # Find which action(s) would produce the observed flow.
 
-        # ===  ACTION MASKING (CRITICAL!) ===
-        # Mask invalid actions to -inf before softmax/loss
-        if action_mask is not None:
-            masked_logits = action_logits.clone()
-            # Expand mask to batch size
-            mask_expanded = action_mask.unsqueeze(0).expand(action_logits.size(0), -1)
-            # Set invalid actions to very negative (will be ~0 after softmax)
-            masked_logits[mask_expanded == 0] = -1e9
+            # Get valid actions for this environment
+            batch_size = flow_t.size(0)
+            device = flow_t.device
+
+            # For each valid action, predict what flow it would create
+            if action_mask is not None:
+                valid_action_indices = torch.where(action_mask > 0)[0]
+            else:
+                valid_action_indices = torch.arange(self.n_actions, device=device)
+
+            # Predict flow for ALL valid actions
+            flow_errors = []
+            for valid_action in valid_action_indices:
+                action_repeated = torch.full((batch_size,), valid_action, dtype=torch.long, device=device)
+                predicted_flow = self.forward_model(flow_t, action_repeated)
+                error = F.mse_loss(predicted_flow, flow_t1, reduction='none').mean(dim=[1,2,3])
+                flow_errors.append(error)
+
+            flow_errors = torch.stack(flow_errors, dim=1)  # (batch, n_valid_actions)
+
+            # The "correct" action is the one that produces closest flow to reality
+            # Multiple actions can be equally correct! (e.g., UP=NOOP at border)
+            # Use soft labels based on how well each action explains the flow
+            soft_targets = torch.softmax(-flow_errors * 10, dim=1)  # Temperature=0.1
+
+            # Inverse model predictions
+            action_logits = self.inverse_model(flow_t, flow_t1)
+
+            # Mask invalid actions
+            if action_mask is not None:
+                masked_logits = action_logits.clone()
+                mask_expanded = action_mask.unsqueeze(0).expand(action_logits.size(0), -1)
+                masked_logits[mask_expanded == 0] = -1e9
+            else:
+                masked_logits = action_logits
+
+            # Only keep valid actions for loss
+            masked_logits_valid = masked_logits[:, valid_action_indices]
+            action_probs = torch.softmax(masked_logits_valid, dim=1)
+
+            # KL divergence: Learn to match the soft distribution
+            loss_inverse = F.kl_div(
+                action_probs.log(),
+                soft_targets,
+                reduction='batchmean'
+            )
+
         else:
-            masked_logits = action_logits
+            # ===  LABEL-BASED LEARNING (OLD ML WAY) ===
+            # Inverse loss: Can we infer action from flow change?
+            action_logits = self.inverse_model(flow_t, flow_t1)
 
-        loss_inverse = F.cross_entropy(masked_logits, action)
+            # ===  ACTION MASKING (CRITICAL!) ===
+            # Mask invalid actions to -inf before softmax/loss
+            if action_mask is not None:
+                masked_logits = action_logits.clone()
+                # Expand mask to batch size
+                mask_expanded = action_mask.unsqueeze(0).expand(action_logits.size(0), -1)
+                # Set invalid actions to very negative (will be ~0 after softmax)
+                masked_logits[mask_expanded == 0] = -1e9
+            else:
+                masked_logits = action_logits
+
+            loss_inverse = F.cross_entropy(masked_logits, action)
 
         # Consistency loss: Do models agree?
         with torch.no_grad():
-            inferred_action = masked_logits.argmax(dim=-1)
+            if action_mask is not None:
+                masked_logits_for_argmax = action_logits.clone()
+                mask_expanded = action_mask.unsqueeze(0).expand(action_logits.size(0), -1)
+                masked_logits_for_argmax[mask_expanded == 0] = -1e9
+                inferred_action = masked_logits_for_argmax.argmax(dim=-1)
+            else:
+                inferred_action = action_logits.argmax(dim=-1)
+
         pred_flow_consistent = self.forward_model(flow_t, inferred_action)
         loss_consistency = F.mse_loss(pred_flow_consistent, flow_t1)
 
@@ -356,7 +449,13 @@ class CoupledFlowModel(nn.Module):
 
         # Metrics (also use masked logits for accuracy!)
         with torch.no_grad():
-            accuracy = (masked_logits.argmax(dim=-1) == action).float().mean()
+            if action_mask is not None:
+                masked_logits_accuracy = action_logits.clone()
+                mask_expanded = action_mask.unsqueeze(0).expand(action_logits.size(0), -1)
+                masked_logits_accuracy[mask_expanded == 0] = -1e9
+                accuracy = (masked_logits_accuracy.argmax(dim=-1) == action).float().mean()
+            else:
+                accuracy = (action_logits.argmax(dim=-1) == action).float().mean()
             flow_magnitude = torch.sqrt((flow_t1 ** 2).sum(dim=1)).mean()
 
         return {
@@ -438,7 +537,9 @@ class FlowInverseTrainer:
                  device=None,
                  flow_method='farneback',
                  frameskip=10,
-                 sequential_sampling=True):
+                 sequential_sampling=True,
+                 use_saccades=True,
+                 effect_based_learning=True):
 
         if device is None:
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -452,6 +553,8 @@ class FlowInverseTrainer:
         self.flow_method = flow_method
         self.env_name = env_name
         self.sequential_sampling = sequential_sampling
+        self.use_saccades = use_saccades
+        self.effect_based_learning = effect_based_learning
 
         # Temporal sampling (frameskip)
         self.frameskip = frameskip
@@ -479,6 +582,12 @@ class FlowInverseTrainer:
             print(f"🔗 Sequential sampling: ENABLED (preserves temporal coherence)")
         else:
             print(f"🎲 Random sampling: ENABLED (standard experience replay)")
+
+        # Natural perception
+        if use_saccades:
+            print(f"👁️  Artificial saccades: ENABLED (prevents static blindness)")
+        if effect_based_learning:
+            print(f"🎯 Effect-based learning: ENABLED (learns outcomes, not labels)")
 
         # Environment
         import gymnasium as gym
@@ -783,7 +892,13 @@ class FlowInverseTrainer:
             frame_curr = self.preprocess_frame(frame_raw)
 
             # Compute flows (now spanning frameskip frames)
-            flow_prev = compute_optical_flow(frame_prev, frame_curr, method=self.flow_method)
+            # Computed at native resolution, downsampled to img_size for model
+            flow_prev = compute_optical_flow(
+                frame_prev, frame_curr,
+                method=self.flow_method,
+                target_size=self.img_size,
+                add_saccade=self.use_saccades
+            )
 
             # ===  ACTIVE INFERENCE POLICY: SELECT NEXT ACTION BASED ON FLOW ===
             if use_active_inference and len(self.buffer) > self.batch_size:
@@ -806,7 +921,12 @@ class FlowInverseTrainer:
                     break
 
             frame_next = self.preprocess_frame(frame_raw_next)
-            flow_curr = compute_optical_flow(frame_curr, frame_next, method=self.flow_method)
+            flow_curr = compute_optical_flow(
+                frame_curr, frame_next,
+                method=self.flow_method,
+                target_size=self.img_size,
+                add_saccade=self.use_saccades
+            )
 
             # Store: (flow_prev, action_next, flow_curr)
             # This is what action_next produced!
@@ -849,7 +969,8 @@ class FlowInverseTrainer:
         # Compute losses WITH ACTION MASK!
         losses = self.model.compute_losses(
             flows_t, flows_t1, actions,
-            action_mask=self.action_mask
+            action_mask=self.action_mask,
+            effect_based=self.effect_based_learning
         )
 
         # Backprop
@@ -910,7 +1031,12 @@ class FlowInverseTrainer:
             if terminated or truncated:
                 break
         frame_curr = self.preprocess_frame(frame_raw)
-        flow_prev = compute_optical_flow(frame_prev, frame_curr, method=self.flow_method)
+        flow_prev = compute_optical_flow(
+            frame_prev, frame_curr,
+            method=self.flow_method,
+            target_size=self.img_size,
+            add_saccade=self.use_saccades
+        )
 
         print(f"🌊 Starting online learning loop...\n")
 
@@ -969,7 +1095,12 @@ class FlowInverseTrainer:
                     break
 
             frame_next = self.preprocess_frame(frame_raw)
-            flow_curr = compute_optical_flow(frame_curr, frame_next, method=self.flow_method)
+            flow_curr = compute_optical_flow(
+                frame_curr, frame_next,
+                method=self.flow_method,
+                target_size=self.img_size,
+                add_saccade=self.use_saccades
+            )
 
             # =================================================================
             # 3. LEARN IMMEDIATELY (Online update!)
@@ -985,7 +1116,8 @@ class FlowInverseTrainer:
                 # Compute loss
                 losses = self.model.compute_losses(
                     flows_t, flows_t1, actions,
-                    action_mask=self.action_mask
+                    action_mask=self.action_mask,
+                    effect_based=self.effect_based_learning
                 )
 
                 # Update weights IMMEDIATELY
@@ -1033,7 +1165,12 @@ class FlowInverseTrainer:
                     if terminated or truncated:
                         break
                 frame_curr = self.preprocess_frame(frame_raw)
-                flow_prev = compute_optical_flow(frame_prev, frame_curr, method=self.flow_method)
+                flow_prev = compute_optical_flow(
+                    frame_prev, frame_curr,
+                    method=self.flow_method,
+                    target_size=self.img_size,
+                    add_saccade=self.use_saccades
+                )
 
                 episodes_done += 1
                 self.episode_count += 1
