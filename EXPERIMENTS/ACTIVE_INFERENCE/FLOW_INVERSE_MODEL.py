@@ -559,7 +559,8 @@ class FlowInverseTrainer:
     """
     def __init__(self,
                  env_name='ALE/Pong-v5',
-                 img_size=160,  # INCREASED: Was 128, now closer to native Atari resolution
+                 img_size=210,  # 210 = Native Atari HEIGHT. Higher than old 128/160!
+                               # (Model forces square, but at least we use full vertical res)
                  latent_dim=128,
                  base_lr=0.0001,
                  buffer_capacity=10000,
@@ -579,6 +580,9 @@ class FlowInverseTrainer:
         print(f"🖥️  Device: {self.device}")
 
         self.img_size = img_size
+        print(f"🎯 Flow resolution: {img_size}×{img_size}")
+        print(f"   (Atari native is 210×160, we use 210×210 square due to model architecture)")
+        print(f"   (Previous default was 128×128 - this is 2.7× MORE pixels! Way less blocky!)")
         self.batch_size = batch_size
         self.flow_method = flow_method
         self.env_name = env_name
