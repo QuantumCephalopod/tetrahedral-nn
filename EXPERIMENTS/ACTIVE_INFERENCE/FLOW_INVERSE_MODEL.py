@@ -412,7 +412,8 @@ class FlowInverseTrainer:
                  buffer_capacity=10000,
                  batch_size=16,
                  device=None,
-                 flow_method='farneback'):
+                 flow_method='farneback',
+                 frameskip=10):
 
         if device is None:
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -425,6 +426,27 @@ class FlowInverseTrainer:
         self.batch_size = batch_size
         self.flow_method = flow_method
         self.env_name = env_name
+
+        # Temporal sampling (frameskip)
+        self.frameskip = frameskip
+        self.effective_fps = 60.0 / frameskip  # Atari native: 60 Hz
+
+        # Natural frequency alignment
+        freq_map = {
+            3: ("Gamma-like", 20.0),
+            6: ("Alpha-like", 10.0),
+            10: ("Theta-like", 6.0),
+            15: ("Saccade-like", 4.0),
+            20: ("Slow theta", 3.0)
+        }
+        if frameskip in freq_map:
+            name, freq = freq_map[frameskip]
+            print(f"⏱️  Temporal sampling: {freq:.1f} Hz ({name} natural frequency)")
+        else:
+            print(f"⏱️  Temporal sampling: {self.effective_fps:.1f} Hz (frameskip={frameskip})")
+
+        if frameskip == 10:
+            print(f"   ✓ φ-aligned with fast memory field (τ₁ = 10 steps)")
 
         # Environment
         import gymnasium as gym
@@ -514,6 +536,94 @@ class FlowInverseTrainer:
             'forward': [], 'inverse': [], 'consistency': [],
             'total': [], 'accuracy': [], 'flow_magnitude': []
         }
+
+        # Checkpoint directory
+        self.checkpoint_dir = Path("checkpoints")
+        self.checkpoint_dir.mkdir(exist_ok=True)
+
+    def save_checkpoint(self, filename=None, include_buffer=True):
+        """
+        Save training checkpoint to disk.
+
+        Saves:
+        - Model weights (forward + inverse)
+        - Optimizer state
+        - Training metrics/history
+        - Experience buffer (optional, can be large)
+        - Training progress (step count, episode count)
+
+        Returns path to saved checkpoint.
+        """
+        if filename is None:
+            filename = f"checkpoint_ep{self.episode_count}_step{self.step_count}.pt"
+
+        checkpoint_path = self.checkpoint_dir / filename
+
+        checkpoint = {
+            'model_state': self.model.state_dict(),
+            'optimizer_state': self.optimizer.state_dict(),
+            'step_count': self.step_count,
+            'episode_count': self.episode_count,
+            'history': self.history,
+            'config': {
+                'env_name': self.env_name,
+                'img_size': self.img_size,
+                'latent_dim': self.model.forward_model.dual_tetra.latent_dim,
+                'n_actions': self.n_actions,
+                'batch_size': self.batch_size,
+                'flow_method': self.flow_method
+            }
+        }
+
+        if include_buffer:
+            # Save buffer as list (deque not directly serializable)
+            checkpoint['buffer'] = list(self.buffer.buffer)
+
+        torch.save(checkpoint, checkpoint_path)
+        print(f"💾 Checkpoint saved: {checkpoint_path}")
+        return checkpoint_path
+
+    def load_checkpoint(self, checkpoint_path, load_buffer=True):
+        """
+        Load training checkpoint from disk.
+
+        Resumes training from saved state:
+        - Restores model weights
+        - Restores optimizer state
+        - Restores training history
+        - Optionally restores experience buffer
+
+        Returns loaded config for verification.
+        """
+        checkpoint_path = Path(checkpoint_path)
+
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+        print(f"📂 Loading checkpoint: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+
+        # Restore model and optimizer
+        self.model.load_state_dict(checkpoint['model_state'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state'])
+
+        # Restore training progress
+        self.step_count = checkpoint['step_count']
+        self.episode_count = checkpoint['episode_count']
+        self.history = checkpoint['history']
+
+        # Restore buffer if available
+        if load_buffer and 'buffer' in checkpoint:
+            self.buffer.buffer = deque(checkpoint['buffer'], maxlen=self.buffer.buffer.maxlen)
+            print(f"   ✓ Restored buffer: {len(self.buffer)} transitions")
+
+        config = checkpoint.get('config', {})
+        print(f"   ✓ Restored training state:")
+        print(f"      Episodes: {self.episode_count}")
+        print(f"      Steps: {self.step_count}")
+        print(f"      History length: {len(self.history['forward'])}")
+
+        return config
 
     def preprocess_frame(self, frame):
         """Resize frame to img_size."""
@@ -631,11 +741,16 @@ class FlowInverseTrainer:
             # Get current action (need one frame first for flow)
             action = random.choice(valid_actions)  # First action is always random
 
-            # Step environment
-            frame_raw, reward, terminated, truncated, info = self.env.step(action)
+            # Execute action for frameskip frames (temporal integration!)
+            # This increases temporal displacement → clearer flow signal
+            for _ in range(self.frameskip):
+                frame_raw, reward, terminated, truncated, info = self.env.step(action)
+                if terminated or truncated:
+                    break
+
             frame_curr = self.preprocess_frame(frame_raw)
 
-            # Compute flows
+            # Compute flows (now spanning frameskip frames)
             flow_prev = compute_optical_flow(frame_prev, frame_curr, method=self.flow_method)
 
             # ===  ACTIVE INFERENCE POLICY: SELECT NEXT ACTION BASED ON FLOW ===
@@ -652,8 +767,12 @@ class FlowInverseTrainer:
                 action_next = random.choice(valid_actions)
                 policy_stats['random'] += 1
 
-            # Execute selected action
-            frame_raw_next, _, term_next, trunc_next, _ = self.env.step(action_next)
+            # Execute selected action for frameskip frames
+            for _ in range(self.frameskip):
+                frame_raw_next, _, term_next, trunc_next, _ = self.env.step(action_next)
+                if term_next or trunc_next:
+                    break
+
             frame_next = self.preprocess_frame(frame_raw_next)
             flow_curr = compute_optical_flow(frame_curr, frame_next, method=self.flow_method)
 
@@ -704,7 +823,7 @@ class FlowInverseTrainer:
 
     def train_loop(self, n_episodes=10, steps_per_episode=50, viz_every=2,
                    use_active_inference=False, policy_temperature=1.0, beta=None,
-                   active_inference_after=0):
+                   active_inference_after=0, save_every=5, checkpoint_name=None):
         """
         Main training loop WITH LIVE VISUALIZATION.
 
@@ -716,6 +835,8 @@ class FlowInverseTrainer:
             policy_temperature: Temperature for action selection softmax
             beta: Exploration coefficient for free energy
             active_inference_after: Start using active inference after N episodes (warm start)
+            save_every: Save checkpoint every N episodes (0 = never, None = only at end)
+            checkpoint_name: Custom checkpoint name (default: auto-generated)
         """
         policy_mode = "🌀 ACTIVE INFERENCE" if use_active_inference else "🎲 RANDOM BASELINE"
         print("\n" + "="*70)
@@ -778,7 +899,18 @@ class FlowInverseTrainer:
                 print(f"\n🎨 Generating visualization (episode {episode+1})...")
                 self._save_live_viz(episode + 1)
 
-        print("\n✅ Training complete!\n")
+            # === AUTO-SAVE CHECKPOINT ===
+            if save_every and save_every > 0 and (episode + 1) % save_every == 0:
+                ckpt_name = checkpoint_name or f"autosave_ep{self.episode_count}.pt"
+                self.save_checkpoint(filename=ckpt_name, include_buffer=True)
+
+        print("\n✅ Training complete!")
+
+        # Final checkpoint
+        if checkpoint_name or save_every:
+            final_name = checkpoint_name or f"final_ep{self.episode_count}.pt"
+            self.save_checkpoint(filename=final_name, include_buffer=True)
+            print()
 
     def _save_live_viz(self, episode_num):
         """Save live visualization during training."""
@@ -1099,12 +1231,12 @@ print("🌊 FLOW-BASED TETRAHEDRAL INVERSE MODEL - READY")
 print("="*70)
 print("\n📚 USAGE EXAMPLES:\n")
 print("1️⃣  Random Baseline (control)")
-print("   trainer = FlowInverseTrainer(env_name='ALE/Pong-v5')")
+print("   trainer = FlowInverseTrainer(env_name='ALE/Pong-v5', frameskip=10)")
 print("   trainer.train_loop(n_episodes=10, use_active_inference=False)")
 print("   trainer.plot_training()")
 print()
 print("2️⃣  Active Inference (🌀 CLOSE THE STRANGE LOOP!)")
-print("   trainer = FlowInverseTrainer(env_name='ALE/Pong-v5')")
+print("   trainer = FlowInverseTrainer(env_name='ALE/Pong-v5', frameskip=10)")
 print("   # Train with random first, then switch to active inference")
 print("   trainer.train_loop(n_episodes=10, use_active_inference=True,")
 print("                      active_inference_after=3, policy_temperature=1.0)")
@@ -1119,6 +1251,19 @@ print("   # High β: Seek diverse outcomes (early exploration)")
 print("   trainer.train_loop(n_episodes=5, use_active_inference=True, beta=0.1)")
 print("   # Low β: Seek certain outcomes (later exploitation)")
 print("   trainer.train_loop(n_episodes=5, use_active_inference=True, beta=0.01)")
+print()
+print("5️⃣  Resume from checkpoint")
+print("   trainer = FlowInverseTrainer(env_name='ALE/Pong-v5')")
+print("   trainer.load_checkpoint('checkpoints/autosave_ep50.pt')")
+print("   trainer.train_loop(n_episodes=10)  # Continue training")
+print()
+print("6️⃣  Test different natural frequencies")
+print("   # Alpha (10 Hz) - default")
+print("   trainer_alpha = FlowInverseTrainer(frameskip=6)")
+print("   # Theta (6 Hz) - φ-aligned with memory field")
+print("   trainer_theta = FlowInverseTrainer(frameskip=10)")
+print("   # Saccade (4 Hz) - human visual sampling")
+print("   trainer_saccade = FlowInverseTrainer(frameskip=15)")
 print()
 print("="*70)
 print("\n🧪 TESTING: Harmonic Resonance Hypothesis")
