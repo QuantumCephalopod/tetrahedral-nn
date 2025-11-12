@@ -152,13 +152,18 @@ class PureOnlineFlowTrainer:
         print(f"   Gradient clipping: {gradient_clip}")
 
     def preprocess_frame(self, frame):
-        """Convert frame to grayscale float tensor."""
+        """
+        Convert frame to grayscale float numpy array.
+
+        Returns numpy array (not tensor) since compute_optical_flow
+        expects numpy arrays or 3D tensors.
+        """
         if len(frame.shape) == 3:
             gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
         else:
             gray = frame
         gray = gray.astype(np.float32) / 255.0
-        return torch.from_numpy(gray)
+        return gray  # Return numpy array, not tensor!
 
     def select_action_active_inference(self, flow, temperature=1.0, beta=None):
         """
