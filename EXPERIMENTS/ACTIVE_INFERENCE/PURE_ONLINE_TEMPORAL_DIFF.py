@@ -260,7 +260,7 @@ class CoupledModel(nn.Module):
     def compute_losses(self, diff_t, diff_t1, action, action_mask=None):
         """
         Compute coupled losses:
-        1. Forward: predict next temporal diff
+        1. Forward: predict next temporal diff (weighted by signal magnitude)
         2. Inverse: infer action from temporal diffs
         3. Consistency: do they agree?
 
@@ -268,7 +268,13 @@ class CoupledModel(nn.Module):
         """
         # Forward loss: predict next temporal diff
         pred_diff_t1 = self.forward_model(diff_t, action)
-        loss_forward = F.mse_loss(pred_diff_t1, diff_t1)
+
+        # Weight prediction error by signal magnitude
+        # Neurons fire for change, not for nothing!
+        # High motion → high weight, static background → low weight
+        signal_magnitude = torch.abs(diff_t1)
+        weighted_error = signal_magnitude * (pred_diff_t1 - diff_t1) ** 2
+        loss_forward = weighted_error.mean()
 
         # Inverse loss: infer action from temporal diffs
         action_logits = self.inverse_model(diff_t, diff_t1)
@@ -288,7 +294,10 @@ class CoupledModel(nn.Module):
             inferred_action = masked_logits.argmax(dim=-1)
 
         pred_diff_consistent = self.forward_model(diff_t, inferred_action)
-        loss_consistency = F.mse_loss(pred_diff_consistent, diff_t1)
+
+        # Also weight consistency by signal magnitude
+        weighted_error_consistency = signal_magnitude * (pred_diff_consistent - diff_t1) ** 2
+        loss_consistency = weighted_error_consistency.mean()
 
         # Accuracy
         with torch.no_grad():
