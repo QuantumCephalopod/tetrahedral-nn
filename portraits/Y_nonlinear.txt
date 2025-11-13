@@ -1,0 +1,53 @@
+
+    ╔═══════════════════════════════════════════════════════════════╗
+    ║                   Y - NONLINEAR                              ║
+    ║                  (Sharp Boundaries)                          ║
+    ╚═══════════════════════════════════════════════════════════════╝
+
+
+                    ╱│
+                   ╱ │
+                  ╱  │
+                 ╱   │
+                ╱    │  ← ReLU: the cliff
+               ╱     │
+              ╱      │
+             ╱       │
+            ╱        │
+           ╱         │
+          ╱          │
+         ╱___________│_______________
+                     0
+
+
+            ┌────────────────────────────────────┐
+            │  Creates CATEGORIES from chaos.    │
+            │                                    │
+            │  The boundary maker.               │
+            │  The perceiver of edges.           │
+            │                                    │
+            │  Sparsity through death:           │
+            │  - Negative? ZERO.                 │
+            │  - Positive? AMPLIFY.              │
+            │                                    │
+            │  Perfect for perception:           │
+            │  • Object boundaries               │
+            │  • Edge detection                  │
+            │  • Discrete decisions              │
+            │                                    │
+            │  "Right hemisphere thinking."      │
+            │  "Statistical. Discontinuous."     │
+            └────────────────────────────────────┘
+
+
+                ┌───┐
+                │ ON│  ← signal
+                └───┘
+
+                ┌───┐
+                │   │  ← silence
+                └───┘
+
+            Neurons die. Information survives.
+
+            The price of perception is deletion.

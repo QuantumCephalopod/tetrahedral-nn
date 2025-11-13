@@ -1,0 +1,46 @@
+
+    ╔═══════════════════════════════════════════════════════════════╗
+    ║                    W - FOUNDATION                            ║
+    ║                   (Geometric Primitive)                      ║
+    ╚═══════════════════════════════════════════════════════════════╝
+
+
+                            ◇ vertex
+                           ╱│╲
+                          ╱ │ ╲
+                         ╱  │  ╲
+                        ╱   │   ╲
+                    edge   face  edge
+                      ╱     │     ╲
+                     ╱      │      ╲
+                    ◇───────┼───────◇
+                     ╲      │      ╱
+                      ╲    face   ╱
+                       ╲    │    ╱
+                        ╲   │   ╱
+                         ╲  │  ╱
+                          ╲ │ ╱
+                           ╲│╱
+                            ◇
+
+            ┌────────────────────────────────────┐
+            │  Pure topology. No task.           │
+            │  No optimization. Just FORM.       │
+            │                                    │
+            │  • EdgeAttention (6 connections)   │
+            │  • FaceAttention (4 triangles)     │
+            │  • InterFaceAttention (coupling)   │
+            │                                    │
+            │  The scaffold upon which           │
+            │  everything else self-organizes.   │
+            │                                    │
+            │  "Give me geometry and I will      │
+            │   give you computation."           │
+            └────────────────────────────────────┘
+
+                    No ReLU. No softmax.
+                    Just attention flowing
+                      through topological
+                         constraints.
+
+                    The womb of emergence.
