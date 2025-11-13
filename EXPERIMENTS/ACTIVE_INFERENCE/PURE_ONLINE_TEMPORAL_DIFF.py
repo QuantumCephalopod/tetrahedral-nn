@@ -41,17 +41,20 @@ ACTION_NAMES = {
 }
 
 
-def preprocess_frame(frame):
+def preprocess_frame(frame, target_size=210):
     """
-    Convert to grayscale, normalize.
-    Simple. No fancy preprocessing.
+    Convert to grayscale, pad to square, upscale to target size.
+
+    Args:
+        frame: Atari frame (210×160×3 typically)
+        target_size: Target resolution (e.g., 420 for 2× upscale)
     """
     if len(frame.shape) == 3:
         gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
     else:
         gray = frame
 
-    # Resize to square (pad, don't stretch!)
+    # Pad to square (don't stretch!)
     h, w = gray.shape
     size = max(h, w)
     padded = np.zeros((size, size), dtype=gray.dtype)
@@ -59,21 +62,65 @@ def preprocess_frame(frame):
     pad_w = (size - w) // 2
     padded[pad_h:pad_h+h, pad_w:pad_w+w] = gray
 
+    # Upscale to target size if needed (for sub-pixel precision!)
+    if size != target_size:
+        padded = cv2.resize(padded, (target_size, target_size), interpolation=cv2.INTER_LINEAR)
+
     # Normalize
     normalized = padded.astype(np.float32) / 255.0
 
     return torch.from_numpy(normalized)
 
 
-def compute_temporal_difference(frame_t, frame_t1):
+def add_microsaccade(frame, saccade_rate=0.2):
+    """
+    Add biological microsaccade: occasional small jitter.
+
+    Purpose: Make static objects visible (they produce diff=0 otherwise)
+
+    Biology: 1-2 Hz frequency, ~1 pixel magnitude
+    Our approach: 20% of frames (~ 1-2 Hz at 6-10 Hz sampling)
+
+    Args:
+        frame: torch tensor (H, W)
+        saccade_rate: probability of saccade this frame
+
+    Returns:
+        Jittered frame (or original if no saccade)
+    """
+    if np.random.random() > saccade_rate:
+        return frame
+
+    # Small Gaussian jitter (most <1 pixel at high res!)
+    dx = int(np.random.normal(0, 0.5))
+    dy = int(np.random.normal(0, 0.5))
+    dx = np.clip(dx, -2, 2)
+    dy = np.clip(dy, -2, 2)
+
+    # Shift (using numpy for cv2)
+    frame_np = frame.numpy()
+    M = np.float32([[1, 0, dx], [0, 1, dy]])
+    shifted = cv2.warpAffine(frame_np, M, (frame_np.shape[1], frame_np.shape[0]))
+
+    return torch.from_numpy(shifted)
+
+
+def compute_temporal_difference(frame_t, frame_t1, add_saccade=True):
     """
     Compute temporal difference: frame_t+1 - frame_t
 
     This is what photoreceptors see.
     Positive = brightening, Negative = darkening
 
+    Args:
+        add_saccade: If True, occasionally jitter frame_t1 (makes static objects visible)
+
     Returns: (1, H, W) tensor
     """
+    # Optional microsaccade (reveals static objects)
+    if add_saccade:
+        frame_t1 = add_microsaccade(frame_t1, saccade_rate=0.2)
+
     diff = frame_t1 - frame_t
     return diff.unsqueeze(0)  # Add channel dimension
 
@@ -179,9 +226,9 @@ class PureOnlineTrainer:
         self.action_mask = self.action_mask.to(self.device)
 
         # Build model
-        print(f"🔷 Building model...")
+        print(f"🔷 Building model (input: {img_size}×{img_size})...")
         self.model = TemporalDifferenceModel(
-            img_size=img_size,
+            img_size=img_size,  # This MUST match the actual frame size!
             latent_dim=latent_dim,
             n_actions=self.n_actions
         ).to(self.device)
@@ -244,7 +291,7 @@ class PureOnlineTrainer:
 
         # Initialize
         frame_raw, info = self.env.reset()
-        frame_prev = preprocess_frame(frame_raw)
+        frame_prev = preprocess_frame(frame_raw, target_size=self.img_size)
 
         # Live visualization
         if show_gameplay:
@@ -256,7 +303,7 @@ class PureOnlineTrainer:
         # Bootstrap: get first temporal difference
         action = random.choice(self.valid_actions)
         frame_raw, _, terminated, truncated, _ = self.env.step(action)
-        frame_curr = preprocess_frame(frame_raw)
+        frame_curr = preprocess_frame(frame_raw, target_size=self.img_size)
         temporal_diff_prev = compute_temporal_difference(frame_prev, frame_curr)
 
         print(f"🌊 Starting...\n")
@@ -277,7 +324,7 @@ class PureOnlineTrainer:
 
             # ===== EXECUTE =====
             frame_raw, _, terminated, truncated, _ = self.env.step(action)
-            frame_next = preprocess_frame(frame_raw)
+            frame_next = preprocess_frame(frame_raw, target_size=self.img_size)
             temporal_diff_curr = compute_temporal_difference(frame_curr, frame_next)
 
             # ===== VISUALIZE =====
@@ -343,12 +390,12 @@ class PureOnlineTrainer:
             # Reset if episode ended
             if terminated or truncated:
                 frame_raw, _ = self.env.reset()
-                frame_prev = preprocess_frame(frame_raw)
+                frame_prev = preprocess_frame(frame_raw, target_size=self.img_size)
 
                 # Bootstrap
                 action = random.choice(self.valid_actions)
                 frame_raw, _, _, _, _ = self.env.step(action)
-                frame_curr = preprocess_frame(frame_raw)
+                frame_curr = preprocess_frame(frame_raw, target_size=self.img_size)
                 temporal_diff_prev = compute_temporal_difference(frame_prev, frame_curr)
 
                 episodes_done += 1
