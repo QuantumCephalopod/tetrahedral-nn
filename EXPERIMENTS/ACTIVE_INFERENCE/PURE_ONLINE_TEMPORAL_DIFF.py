@@ -566,7 +566,7 @@ class PureOnlineTrainer:
         while step < n_steps:
             # ===== BUILD TRAJECTORY TENSOR + TEMPORAL ENCODINGS =====
             # Stack 3 most recent diffs: [diff_t-2, diff_t-1, diff_t]
-            diffs = [diff for diff, _ in trajectory_buffer]
+            diffs = [diff.squeeze(0) for diff, _ in trajectory_buffer]  # Remove channel dim from each diff
             step_counts = [sc for _, sc in trajectory_buffer]
 
             trajectory_t = torch.stack(diffs, dim=0)  # (3, H, W)
