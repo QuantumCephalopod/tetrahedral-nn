@@ -132,7 +132,7 @@ def compute_temporal_difference(frame_t, frame_t1, add_saccade=True, step_count=
     return diff.unsqueeze(0)  # Add channel dimension
 
 
-class TemporalDifferenceModel(nn.Module):
+class ForwardModel(nn.Module):
     """
     Forward model: predict temporal difference from current state + action
 
@@ -187,6 +187,122 @@ class TemporalDifferenceModel(nn.Module):
         return next_diff
 
 
+class InverseModel(nn.Module):
+    """
+    Inverse model: infer action from temporal difference changes
+
+    (temporal_diff_t, temporal_diff_t+1) → action
+
+    This forces the forward model to encode meaningful change!
+    Can't predict action from "nothing changed" → must represent motion.
+    """
+    def __init__(self, img_size=210, latent_dim=128, n_actions=18):
+        super().__init__()
+        self.img_size = img_size
+        self.n_actions = n_actions
+
+        # Tetrahedral network sees TWO temporal diffs
+        input_dim = 2 * img_size * img_size  # Two temporal diff fields
+        output_dim = n_actions                # Action logits
+
+        self.dual_tetra = DualTetrahedralNetwork(
+            input_dim=input_dim,
+            output_dim=output_dim,
+            latent_dim=latent_dim,
+            coupling_strength=0.5,
+            output_mode="weighted"
+        )
+
+    def forward(self, temporal_diff_t, temporal_diff_t1):
+        """
+        Infer action from temporal difference transition.
+
+        Args:
+            temporal_diff_t: (batch, 1, H, W)
+            temporal_diff_t1: (batch, 1, H, W)
+
+        Returns:
+            action_logits: (batch, n_actions)
+        """
+        batch_size = temporal_diff_t.size(0)
+
+        # Flatten both diffs
+        diff_t_flat = temporal_diff_t.reshape(batch_size, -1)
+        diff_t1_flat = temporal_diff_t1.reshape(batch_size, -1)
+
+        # Concatenate
+        x = torch.cat([diff_t_flat, diff_t1_flat], dim=-1)
+
+        # Predict action
+        action_logits = self.dual_tetra(x)
+
+        return action_logits
+
+
+class CoupledModel(nn.Module):
+    """
+    Coupled forward + inverse models.
+
+    The consistency loss between them prevents mode collapse:
+    - Forward can't just predict "nothing changes"
+    - Because inverse needs to infer actions from changes
+    - They constrain each other!
+    """
+    def __init__(self, img_size=210, latent_dim=128, n_actions=18):
+        super().__init__()
+        self.forward_model = ForwardModel(img_size, latent_dim, n_actions)
+        self.inverse_model = InverseModel(img_size, latent_dim, n_actions)
+
+    def forward(self, temporal_diff, action):
+        """Convenience: just call forward model"""
+        return self.forward_model(temporal_diff, action)
+
+    def compute_losses(self, diff_t, diff_t1, action, action_mask=None):
+        """
+        Compute coupled losses:
+        1. Forward: predict next temporal diff
+        2. Inverse: infer action from temporal diffs
+        3. Consistency: do they agree?
+
+        This coupling prevents mode collapse!
+        """
+        # Forward loss: predict next temporal diff
+        pred_diff_t1 = self.forward_model(diff_t, action)
+        loss_forward = F.mse_loss(pred_diff_t1, diff_t1)
+
+        # Inverse loss: infer action from temporal diffs
+        action_logits = self.inverse_model(diff_t, diff_t1)
+
+        # Apply action mask (only valid actions)
+        if action_mask is not None:
+            masked_logits = action_logits.clone()
+            mask_expanded = action_mask.unsqueeze(0).expand(action_logits.size(0), -1)
+            masked_logits[mask_expanded == 0] = -1e9
+        else:
+            masked_logits = action_logits
+
+        loss_inverse = F.cross_entropy(masked_logits, action)
+
+        # Consistency loss: if inverse predicts action, forward should match reality
+        with torch.no_grad():
+            inferred_action = masked_logits.argmax(dim=-1)
+
+        pred_diff_consistent = self.forward_model(diff_t, inferred_action)
+        loss_consistency = F.mse_loss(pred_diff_consistent, diff_t1)
+
+        # Accuracy
+        with torch.no_grad():
+            accuracy = (inferred_action == action).float().mean().item()
+
+        return {
+            'forward': loss_forward,
+            'inverse': loss_inverse,
+            'consistency': loss_consistency,
+            'total': loss_forward + loss_inverse + 0.3 * loss_consistency,
+            'accuracy': accuracy
+        }
+
+
 class PureOnlineTrainer:
     """
     Pure online learning with temporal differences.
@@ -232,9 +348,9 @@ class PureOnlineTrainer:
         self.action_mask[self.valid_actions] = 1.0
         self.action_mask = self.action_mask.to(self.device)
 
-        # Build model
-        print(f"🔷 Building model (input: {img_size}×{img_size})...")
-        self.model = TemporalDifferenceModel(
+        # Build coupled model (forward + inverse)
+        print(f"🔷 Building coupled model (input: {img_size}×{img_size})...")
+        self.model = CoupledModel(
             img_size=img_size,  # This MUST match the actual frame size!
             latent_dim=latent_dim,
             n_actions=self.n_actions
@@ -242,10 +358,17 @@ class PureOnlineTrainer:
 
         self.optimizer = optim.Adam(self.model.parameters(), lr=base_lr)
 
-        print(f"✅ Model ready ({sum(p.numel() for p in self.model.parameters())/1e6:.1f}M params)")
+        print(f"✅ Coupled model ready ({sum(p.numel() for p in self.model.parameters())/1e6:.1f}M params)")
+        print(f"   Forward + Inverse + Consistency (prevents mode collapse!)")
 
         # History
-        self.history = {'loss': [], 'accuracy': []}
+        self.history = {
+            'loss': [],
+            'forward': [],
+            'inverse': [],
+            'consistency': [],
+            'accuracy': []
+        }
         self.step_count = 0
 
         print(f"🌊 Initialized - NO BUFFER, NO FLOW PREPROCESSING")
@@ -304,7 +427,7 @@ class PureOnlineTrainer:
         if show_gameplay:
             import matplotlib.pyplot as plt
             from IPython import display
-            fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+            fig, axes = plt.subplots(2, 4, figsize=(20, 10))
             plt.ion()
 
         # Bootstrap: get first temporal difference
@@ -336,10 +459,10 @@ class PureOnlineTrainer:
 
             # ===== VISUALIZE =====
             if show_gameplay and step % 2 == 0:
-                # Row 1: Game, Input, Ground Truth
+                # Row 1: Game, Input, Ground Truth, Forward Prediction
                 axes[0, 0].clear()
                 axes[0, 0].imshow(frame_raw)
-                axes[0, 0].set_title(f'Step {step} | {ACTION_NAMES.get(action, action)}')
+                axes[0, 0].set_title(f'Step {step} | Action: {ACTION_NAMES.get(action, action)}')
                 axes[0, 0].axis('off')
 
                 axes[0, 1].clear()
@@ -354,36 +477,78 @@ class PureOnlineTrainer:
                 axes[0, 2].set_title('Ground Truth: Diff t+1→t+2')
                 axes[0, 2].axis('off')
 
-                # Row 2: Prediction, Error, Loss curve
+                # Row 2: Forward Prediction, Inverse Prediction, Errors, Loss
                 if step > 0:
-                    # Get model prediction
+                    # Get predictions
                     with torch.no_grad():
                         diff_t = temporal_diff_prev.unsqueeze(0).to(self.device)
+                        diff_t1 = temporal_diff_curr.unsqueeze(0).to(self.device)
                         actions_tensor = torch.tensor([action], dtype=torch.long).to(self.device)
-                        pred_diff = self.model(diff_t, actions_tensor)
+
+                        # Forward prediction
+                        pred_diff = self.model.forward_model(diff_t, actions_tensor)
                         pred_viz = pred_diff.squeeze().cpu().numpy()
 
+                        # Inverse prediction
+                        action_logits = self.model.inverse_model(diff_t, diff_t1)
+                        if self.action_mask is not None:
+                            masked_logits = action_logits.clone()
+                            mask_expanded = self.action_mask.unsqueeze(0).expand(action_logits.size(0), -1)
+                            masked_logits[mask_expanded == 0] = -1e9
+                        else:
+                            masked_logits = action_logits
+                        inferred_action = masked_logits.argmax(dim=-1).item()
+                        action_probs = torch.softmax(masked_logits, dim=-1).squeeze().cpu().numpy()
+
+                    # Forward prediction
+                    axes[0, 3].clear()
+                    axes[0, 3].imshow(pred_viz, cmap='RdBu', vmin=-1, vmax=1)
+                    axes[0, 3].set_title('Forward Prediction: Diff t+1→t+2')
+                    axes[0, 3].axis('off')
+
+                    # Forward error
+                    error_viz = np.abs(truth_viz - pred_viz)
                     axes[1, 0].clear()
-                    axes[1, 0].imshow(pred_viz, cmap='RdBu', vmin=-1, vmax=1)
-                    axes[1, 0].set_title('Model Prediction: Diff t+1→t+2')
+                    axes[1, 0].imshow(error_viz, cmap='hot', vmin=0, vmax=0.5)
+                    axes[1, 0].set_title(f'Forward Error (MAE: {error_viz.mean():.4f})')
                     axes[1, 0].axis('off')
 
-                    # Prediction error
-                    error_viz = np.abs(truth_viz - pred_viz)
+                    # Inverse prediction (action probabilities)
                     axes[1, 1].clear()
-                    axes[1, 1].imshow(error_viz, cmap='hot', vmin=0, vmax=0.5)
-                    axes[1, 1].set_title(f'Error (MAE: {error_viz.mean():.4f})')
-                    axes[1, 1].axis('off')
+                    valid_action_names = [ACTION_NAMES.get(a, str(a)) for a in self.valid_actions]
+                    valid_probs = action_probs[self.valid_actions]
+                    axes[1, 1].bar(range(len(self.valid_actions)), valid_probs)
+                    axes[1, 1].set_xticks(range(len(self.valid_actions)))
+                    axes[1, 1].set_xticklabels(valid_action_names, rotation=45)
+                    axes[1, 1].set_ylim([0, 1])
+                    axes[1, 1].set_title(f'Inverse: {ACTION_NAMES.get(inferred_action, inferred_action)}' +
+                                        (f' ✓' if inferred_action == action else f' ✗'))
+                    axes[1, 1].grid(alpha=0.3)
 
-                # Loss curve
-                if len(self.history['loss']) > 10:
-                    axes[1, 2].clear()
-                    recent_loss = self.history['loss'][-100:]
-                    axes[1, 2].plot(recent_loss, color='blue', linewidth=2)
-                    axes[1, 2].set_title(f'Loss: {recent_loss[-1]:.6f}')
-                    axes[1, 2].set_xlabel('Recent Steps')
-                    axes[1, 2].set_ylim([0, max(recent_loss) * 1.1])
-                    axes[1, 2].grid(alpha=0.3)
+                    # Loss curves
+                    if len(self.history['forward']) > 10:
+                        axes[1, 2].clear()
+                        recent_fwd = self.history['forward'][-100:]
+                        recent_inv = self.history['inverse'][-100:]
+                        axes[1, 2].plot(recent_fwd, label='Forward', color='blue', linewidth=2)
+                        axes[1, 2].plot(recent_inv, label='Inverse', color='orange', linewidth=2)
+                        axes[1, 2].set_title(f'Fwd: {recent_fwd[-1]:.5f} | Inv: {recent_inv[-1]:.5f}')
+                        axes[1, 2].set_xlabel('Recent Steps')
+                        axes[1, 2].legend()
+                        axes[1, 2].grid(alpha=0.3)
+
+                    # Accuracy curve
+                    if len(self.history['accuracy']) > 10:
+                        axes[1, 3].clear()
+                        recent_acc = self.history['accuracy'][-100:]
+                        axes[1, 3].plot(recent_acc, color='green', linewidth=2)
+                        axes[1, 3].axhline(1/len(self.valid_actions), color='red',
+                                          linestyle='--', label='Random', alpha=0.5)
+                        axes[1, 3].set_ylim([0, 1])
+                        axes[1, 3].set_title(f'Inverse Accuracy: {recent_acc[-1]*100:.1f}%')
+                        axes[1, 3].set_xlabel('Recent Steps')
+                        axes[1, 3].legend()
+                        axes[1, 3].grid(alpha=0.3)
 
                 plt.tight_layout()
                 display.clear_output(wait=True)
@@ -394,13 +559,12 @@ class PureOnlineTrainer:
             actions = torch.tensor([action], dtype=torch.long).to(self.device)
             diff_t1 = temporal_diff_curr.unsqueeze(0).to(self.device)
 
-            # Forward prediction
-            pred_diff = self.model(diff_t, actions)
-            loss = F.mse_loss(pred_diff, diff_t1)
+            # Compute coupled losses (forward + inverse + consistency)
+            losses = self.model.compute_losses(diff_t, diff_t1, actions, action_mask=self.action_mask)
 
             # Update
             self.optimizer.zero_grad()
-            loss.backward()
+            losses['total'].backward()
 
             if self.gradient_clip > 0:
                 torch.nn.utils.clip_grad_norm_(
@@ -411,10 +575,16 @@ class PureOnlineTrainer:
             self.optimizer.step()
 
             # Track
-            self.history['loss'].append(loss.item())
+            self.history['loss'].append(losses['total'].item())
+            self.history['forward'].append(losses['forward'].item())
+            self.history['inverse'].append(losses['inverse'].item())
+            self.history['consistency'].append(losses['consistency'].item())
+            self.history['accuracy'].append(losses['accuracy'])
 
             if step % log_every == 0:
-                print(f"Step {step:4d} | Loss: {loss.item():.4f} | Episodes: {episodes_done}")
+                print(f"Step {step:4d} | Fwd: {losses['forward'].item():.4f} | "
+                      f"Inv: {losses['inverse'].item():.4f} | "
+                      f"Acc: {losses['accuracy']*100:.1f}% | Eps: {episodes_done}")
 
             # ===== CONTINUE =====
             temporal_diff_prev = temporal_diff_curr
