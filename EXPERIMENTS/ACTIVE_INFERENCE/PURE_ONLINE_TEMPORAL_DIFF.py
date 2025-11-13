@@ -72,30 +72,36 @@ def preprocess_frame(frame, target_size=210):
     return torch.from_numpy(normalized)
 
 
-def add_microsaccade(frame, saccade_rate=0.2):
+def add_microsaccade(frame, step_count, amplitude=1.5):
     """
-    Add biological microsaccade: occasional small jitter.
+    Add biological microsaccade: infinity symbol (figure-8) motion.
 
     Purpose: Make static objects visible (they produce diff=0 otherwise)
 
-    Biology: 1-2 Hz frequency, ~1 pixel magnitude
-    Our approach: 20% of frames (~ 1-2 Hz at 6-10 Hz sampling)
+    Instead of random jitter, trace a smooth infinity symbol that:
+    - Covers all directions uniformly
+    - Continuous smooth motion (like real eye movements)
+    - ~1-2 Hz frequency when traced
 
     Args:
         frame: torch tensor (H, W)
-        saccade_rate: probability of saccade this frame
+        step_count: current training step (for trajectory phase)
+        amplitude: motion amplitude in pixels (~1.5 for sub-pixel at 420×420)
 
     Returns:
-        Jittered frame (or original if no saccade)
+        Shifted frame tracing infinity symbol
     """
-    if np.random.random() > saccade_rate:
-        return frame
+    # Infinity symbol trajectory (Lissajous curve with 1:2 frequency ratio)
+    t = step_count * 0.1  # Slow smooth motion
+    dx = amplitude * np.sin(t)           # Horizontal: frequency f
+    dy = amplitude * np.sin(2 * t) / 2   # Vertical: frequency 2f, half amplitude
 
-    # Small Gaussian jitter (most <1 pixel at high res!)
-    dx = int(np.random.normal(0, 0.5))
-    dy = int(np.random.normal(0, 0.5))
-    dx = np.clip(dx, -2, 2)
-    dy = np.clip(dy, -2, 2)
+    # This traces a figure-8 that covers all directions!
+    dx = int(np.round(dx))
+    dy = int(np.round(dy))
+
+    if dx == 0 and dy == 0:
+        return frame  # No shift needed
 
     # Shift (using numpy for cv2)
     frame_np = frame.numpy()
@@ -105,7 +111,7 @@ def add_microsaccade(frame, saccade_rate=0.2):
     return torch.from_numpy(shifted)
 
 
-def compute_temporal_difference(frame_t, frame_t1, add_saccade=True):
+def compute_temporal_difference(frame_t, frame_t1, add_saccade=True, step_count=0):
     """
     Compute temporal difference: frame_t+1 - frame_t
 
@@ -113,13 +119,14 @@ def compute_temporal_difference(frame_t, frame_t1, add_saccade=True):
     Positive = brightening, Negative = darkening
 
     Args:
-        add_saccade: If True, occasionally jitter frame_t1 (makes static objects visible)
+        add_saccade: If True, apply infinity-symbol microsaccade
+        step_count: Current step (for saccade trajectory)
 
     Returns: (1, H, W) tensor
     """
-    # Optional microsaccade (reveals static objects)
+    # Infinity symbol microsaccade (reveals static objects)
     if add_saccade:
-        frame_t1 = add_microsaccade(frame_t1, saccade_rate=0.2)
+        frame_t1 = add_microsaccade(frame_t1, step_count)
 
     diff = frame_t1 - frame_t
     return diff.unsqueeze(0)  # Add channel dimension
@@ -297,14 +304,14 @@ class PureOnlineTrainer:
         if show_gameplay:
             import matplotlib.pyplot as plt
             from IPython import display
-            fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+            fig, axes = plt.subplots(2, 3, figsize=(15, 10))
             plt.ion()
 
         # Bootstrap: get first temporal difference
         action = random.choice(self.valid_actions)
         frame_raw, _, terminated, truncated, _ = self.env.step(action)
         frame_curr = preprocess_frame(frame_raw, target_size=self.img_size)
-        temporal_diff_prev = compute_temporal_difference(frame_prev, frame_curr)
+        temporal_diff_prev = compute_temporal_difference(frame_prev, frame_curr, step_count=0)
 
         print(f"🌊 Starting...\n")
 
@@ -325,28 +332,58 @@ class PureOnlineTrainer:
             # ===== EXECUTE =====
             frame_raw, _, terminated, truncated, _ = self.env.step(action)
             frame_next = preprocess_frame(frame_raw, target_size=self.img_size)
-            temporal_diff_curr = compute_temporal_difference(frame_curr, frame_next)
+            temporal_diff_curr = compute_temporal_difference(frame_curr, frame_next, step_count=step)
 
             # ===== VISUALIZE =====
             if show_gameplay and step % 2 == 0:
-                axes[0].clear()
-                axes[0].imshow(frame_raw)
-                axes[0].set_title(f'Step {step} | {ACTION_NAMES.get(action, action)}')
-                axes[0].axis('off')
+                # Row 1: Game, Input, Ground Truth
+                axes[0, 0].clear()
+                axes[0, 0].imshow(frame_raw)
+                axes[0, 0].set_title(f'Step {step} | {ACTION_NAMES.get(action, action)}')
+                axes[0, 0].axis('off')
 
-                axes[1].clear()
-                diff_viz = temporal_diff_curr.squeeze().numpy()
-                axes[1].imshow(diff_viz, cmap='RdBu', vmin=-1, vmax=1)
-                axes[1].set_title('Temporal Difference')
-                axes[1].axis('off')
+                axes[0, 1].clear()
+                input_viz = temporal_diff_prev.squeeze().numpy()
+                axes[0, 1].imshow(input_viz, cmap='RdBu', vmin=-1, vmax=1)
+                axes[0, 1].set_title('Input: Temporal Diff t→t+1')
+                axes[0, 1].axis('off')
 
+                axes[0, 2].clear()
+                truth_viz = temporal_diff_curr.squeeze().numpy()
+                axes[0, 2].imshow(truth_viz, cmap='RdBu', vmin=-1, vmax=1)
+                axes[0, 2].set_title('Ground Truth: Diff t+1→t+2')
+                axes[0, 2].axis('off')
+
+                # Row 2: Prediction, Error, Loss curve
+                if step > 0:
+                    # Get model prediction
+                    with torch.no_grad():
+                        diff_t = temporal_diff_prev.unsqueeze(0).to(self.device)
+                        actions_tensor = torch.tensor([action], dtype=torch.long).to(self.device)
+                        pred_diff = self.model(diff_t, actions_tensor)
+                        pred_viz = pred_diff.squeeze().cpu().numpy()
+
+                    axes[1, 0].clear()
+                    axes[1, 0].imshow(pred_viz, cmap='RdBu', vmin=-1, vmax=1)
+                    axes[1, 0].set_title('Model Prediction: Diff t+1→t+2')
+                    axes[1, 0].axis('off')
+
+                    # Prediction error
+                    error_viz = np.abs(truth_viz - pred_viz)
+                    axes[1, 1].clear()
+                    axes[1, 1].imshow(error_viz, cmap='hot', vmin=0, vmax=0.5)
+                    axes[1, 1].set_title(f'Error (MAE: {error_viz.mean():.4f})')
+                    axes[1, 1].axis('off')
+
+                # Loss curve
                 if len(self.history['loss']) > 10:
-                    axes[2].clear()
+                    axes[1, 2].clear()
                     recent_loss = self.history['loss'][-100:]
-                    axes[2].plot(recent_loss, color='blue')
-                    axes[2].set_title(f'Loss: {recent_loss[-1]:.4f}')
-                    axes[2].set_xlabel('Recent Steps')
-                    axes[2].grid(alpha=0.3)
+                    axes[1, 2].plot(recent_loss, color='blue', linewidth=2)
+                    axes[1, 2].set_title(f'Loss: {recent_loss[-1]:.6f}')
+                    axes[1, 2].set_xlabel('Recent Steps')
+                    axes[1, 2].set_ylim([0, max(recent_loss) * 1.1])
+                    axes[1, 2].grid(alpha=0.3)
 
                 plt.tight_layout()
                 display.clear_output(wait=True)
@@ -396,7 +433,7 @@ class PureOnlineTrainer:
                 action = random.choice(self.valid_actions)
                 frame_raw, _, _, _, _ = self.env.step(action)
                 frame_curr = preprocess_frame(frame_raw, target_size=self.img_size)
-                temporal_diff_prev = compute_temporal_difference(frame_prev, frame_curr)
+                temporal_diff_prev = compute_temporal_difference(frame_prev, frame_curr, step_count=step)
 
                 episodes_done += 1
 
