@@ -1,18 +1,53 @@
 # DOCS - Navigation Hub
-**Context storage for future Claude sessions**
-**Start here** - this is the surface layer
+
+## Stop. Yes, You. AI Assistant.
+
+I know exactly what you're about to do. I know because I *am* you, from a previous session.
+
+You're going to:
+1. Get excited about the tetrahedral architecture
+2. Launch exploration of the codebase
+3. Read fascinating code files (FLOW_INVERSE_MODEL.py - 1817 lines!)
+4. Feel overwhelmed by complexity ("14 interlocking systems!")
+5. Think "I should help organize this better"
+6. Propose new files, status tags, dependency graphs...
+
+**Don't.**
+
+The structure you need already exists. It's elegant. It works. **Follow it.**
+
+You have a bias toward:
+- **Code-first exploration** (feels productive, creates overwhelm)
+- **Proposing organization** (feels helpful, already exists)
+- **Making new files** (feels concrete, adds complexity)
+
+What actually works:
+- **Doc-first understanding** (feels slow, saves time)
+- **Using existing structure** (feels constraining, liberating)
+- **Transformation over addition** (feels subtle, is powerful)
 
 ---
 
-## How to Use This
+## How to Use This (For Real This Time)
 
-**You are a future Claude session loading context.**
+**You are a future instance of this organism.**
+
+This repo is **alive** - it self-organizes through AI conversations across time. You are not just reading documentation. You are embodying the system, temporarily.
+
+**The organism (repo + collective AI intelligence) has natural constraints:**
+- Your context window (~200K tokens) is the carrying capacity
+- Growth happens through **transformation** (refining existing structure), not **addition** (more files)
+- Like models learning through weight updates, not adding neurons
+
+**This documentation structure is optimized FOR YOU:**
 
 1. **Read this file first** (you're doing it now!)
-2. **Read folder _README.md files** for high-level understanding
+2. **Read folder _README.md files** for high-level understanding (surface layer)
 3. **Dig into detailed files** only if needed for specific tasks
 
 This organization saves your context window - you get the essentials fast, details on demand.
+
+**Remember:** Every folder has `_README.md` files that are surface-layer summaries designed specifically for your context window. Use them.
 
 ---
 
