@@ -1,18 +1,29 @@
 """
-PURE ONLINE LEARNING - TEMPORAL DIFFERENCES
-============================================
+PURE ONLINE LEARNING - TEMPORAL DIFFERENCES WITH TRAJECTORY
+============================================================
 
-No optical flow preprocessing. Just raw temporal differences.
+No optical flow preprocessing. Just raw temporal differences with TRAJECTORY context.
 
 This is what photoreceptors actually see: dI/dt (change in intensity over time)
 
-The tetrahedral network learns motion structure from these raw signals,
-just like the visual system does.
+CRITICAL INSIGHT: Motion requires TRIANGULATION!
+- 1 point = position
+- 2 points = velocity
+- 3 points = acceleration, trajectory curvature
+
+Forward model: 3 temporal diffs [t-2, t-1, t] + action → diff_t+1
+Inverse model: 4 temporal diffs [t-2, t-1, t, t+1] → action
+
+The tetrahedral network naturally handles 3-4 inputs → perfect for trajectory!
+φ-hierarchical memory integrates across timescales to extract motion structure.
+
+Signal-weighted loss: weight = |ground_truth| * (prediction - target)²
+Neurons fire for CHANGE, not for static input.
 
 Philosophy: Nature already figured this out. Give the network the real signal.
 
 Author: Philipp Remy Bartholomäus & Claude
-Date: November 12, 2025
+Date: November 13, 2025
 """
 
 import torch
@@ -134,21 +145,25 @@ def compute_temporal_difference(frame_t, frame_t1, add_saccade=True, step_count=
 
 class ForwardModel(nn.Module):
     """
-    Forward model: predict temporal difference from current state + action
+    Forward model: predict temporal difference from TRAJECTORY + action
 
-    (temporal_diff_t, action) → temporal_diff_t+1
+    TRIANGULATION: Need 3 points to extract velocity and acceleration!
+    (temporal_diff_trajectory[t-2, t-1, t], action) → temporal_diff_t+1
+
+    This gives motion CONTEXT, not just teleportation from A to B.
     """
-    def __init__(self, img_size=210, latent_dim=128, n_actions=18):
+    def __init__(self, img_size=210, latent_dim=128, n_actions=18, trajectory_length=3):
         super().__init__()
         self.img_size = img_size
         self.n_actions = n_actions
+        self.trajectory_length = trajectory_length
 
         # Action embedding
         self.action_encoder = nn.Embedding(n_actions, 64)
 
-        # Tetrahedral network
-        input_dim = img_size * img_size + 64  # Temporal diff (1 channel) + action
-        output_dim = img_size * img_size      # Next temporal diff
+        # Tetrahedral network sees TRAJECTORY (3 temporal diffs) + action
+        input_dim = trajectory_length * img_size * img_size + 64
+        output_dim = img_size * img_size  # Next temporal diff
 
         self.dual_tetra = DualTetrahedralNetwork(
             input_dim=input_dim,
@@ -158,27 +173,28 @@ class ForwardModel(nn.Module):
             output_mode="weighted"
         )
 
-    def forward(self, temporal_diff, action):
+    def forward(self, temporal_diff_trajectory, action):
         """
-        Predict next temporal difference.
+        Predict next temporal difference from trajectory context.
 
         Args:
-            temporal_diff: (batch, 1, H, W)
+            temporal_diff_trajectory: (batch, trajectory_length, H, W)
+                                      e.g., (1, 3, 210, 210) for [t-2, t-1, t]
             action: (batch,)
 
         Returns:
             next_temporal_diff: (batch, 1, H, W)
         """
-        batch_size = temporal_diff.size(0)
+        batch_size = temporal_diff_trajectory.size(0)
 
-        # Flatten temporal diff
-        diff_flat = temporal_diff.reshape(batch_size, -1)
+        # Flatten trajectory (all 3 diffs concatenated)
+        trajectory_flat = temporal_diff_trajectory.reshape(batch_size, -1)
 
         # Encode action
         action_embed = self.action_encoder(action)
 
-        # Concatenate
-        x = torch.cat([diff_flat, action_embed], dim=-1)
+        # Concatenate trajectory + action
+        x = torch.cat([trajectory_flat, action_embed], dim=-1)
 
         # Predict next temporal diff
         next_diff_flat = self.dual_tetra(x)
@@ -189,21 +205,22 @@ class ForwardModel(nn.Module):
 
 class InverseModel(nn.Module):
     """
-    Inverse model: infer action from temporal difference changes
+    Inverse model: infer action from EXTENDED trajectory
 
-    (temporal_diff_t, temporal_diff_t+1) → action
+    MAXIMUM TRIANGULATION: 4 temporal diffs [t-2, t-1, t, t+1]
+    This gives full motion context including what happened AFTER the action.
 
-    This forces the forward model to encode meaningful change!
-    Can't predict action from "nothing changed" → must represent motion.
+    Can't infer action from "nothing changed" → forces meaningful representations!
     """
-    def __init__(self, img_size=210, latent_dim=128, n_actions=18):
+    def __init__(self, img_size=210, latent_dim=128, n_actions=18, trajectory_length=4):
         super().__init__()
         self.img_size = img_size
         self.n_actions = n_actions
+        self.trajectory_length = trajectory_length
 
-        # Tetrahedral network sees TWO temporal diffs
-        input_dim = 2 * img_size * img_size  # Two temporal diff fields
-        output_dim = n_actions                # Action logits
+        # Tetrahedral network sees FOUR temporal diffs
+        input_dim = trajectory_length * img_size * img_size
+        output_dim = n_actions  # Action logits
 
         self.dual_tetra = DualTetrahedralNetwork(
             input_dim=input_dim,
@@ -213,61 +230,61 @@ class InverseModel(nn.Module):
             output_mode="weighted"
         )
 
-    def forward(self, temporal_diff_t, temporal_diff_t1):
+    def forward(self, temporal_diff_trajectory):
         """
-        Infer action from temporal difference transition.
+        Infer action from extended trajectory.
 
         Args:
-            temporal_diff_t: (batch, 1, H, W)
-            temporal_diff_t1: (batch, 1, H, W)
+            temporal_diff_trajectory: (batch, trajectory_length, H, W)
+                                      e.g., (1, 4, 210, 210) for [t-2, t-1, t, t+1]
 
         Returns:
             action_logits: (batch, n_actions)
         """
-        batch_size = temporal_diff_t.size(0)
+        batch_size = temporal_diff_trajectory.size(0)
 
-        # Flatten both diffs
-        diff_t_flat = temporal_diff_t.reshape(batch_size, -1)
-        diff_t1_flat = temporal_diff_t1.reshape(batch_size, -1)
-
-        # Concatenate
-        x = torch.cat([diff_t_flat, diff_t1_flat], dim=-1)
+        # Flatten trajectory (all 4 diffs concatenated)
+        trajectory_flat = temporal_diff_trajectory.reshape(batch_size, -1)
 
         # Predict action
-        action_logits = self.dual_tetra(x)
+        action_logits = self.dual_tetra(trajectory_flat)
 
         return action_logits
 
 
 class CoupledModel(nn.Module):
     """
-    Coupled forward + inverse models.
+    Coupled forward + inverse models with TRAJECTORY context.
 
-    The consistency loss between them prevents mode collapse:
-    - Forward can't just predict "nothing changes"
-    - Because inverse needs to infer actions from changes
-    - They constrain each other!
+    Forward: 3 temporal diffs + action → next diff
+    Inverse: 4 temporal diffs → action
+
+    TRIANGULATION gives motion structure!
+    The consistency loss prevents mode collapse.
     """
     def __init__(self, img_size=210, latent_dim=128, n_actions=18):
         super().__init__()
-        self.forward_model = ForwardModel(img_size, latent_dim, n_actions)
-        self.inverse_model = InverseModel(img_size, latent_dim, n_actions)
+        self.forward_model = ForwardModel(img_size, latent_dim, n_actions, trajectory_length=3)
+        self.inverse_model = InverseModel(img_size, latent_dim, n_actions, trajectory_length=4)
 
-    def forward(self, temporal_diff, action):
+    def forward(self, temporal_diff_trajectory, action):
         """Convenience: just call forward model"""
-        return self.forward_model(temporal_diff, action)
+        return self.forward_model(temporal_diff_trajectory, action)
 
-    def compute_losses(self, diff_t, diff_t1, action, action_mask=None):
+    def compute_losses(self, trajectory_t, diff_t1, action, action_mask=None):
         """
-        Compute coupled losses:
-        1. Forward: predict next temporal diff (weighted by signal magnitude)
-        2. Inverse: infer action from temporal diffs
+        Compute coupled losses with trajectory context:
+        1. Forward: predict next temporal diff from trajectory (weighted by signal)
+        2. Inverse: infer action from extended trajectory
         3. Consistency: do they agree?
 
-        This coupling prevents mode collapse!
+        Args:
+            trajectory_t: (batch, 3, H, W) - [diff_t-2, diff_t-1, diff_t]
+            diff_t1: (batch, 1, H, W) - next temporal diff
+            action: (batch,) - action taken
         """
-        # Forward loss: predict next temporal diff
-        pred_diff_t1 = self.forward_model(diff_t, action)
+        # Forward loss: predict next temporal diff from trajectory
+        pred_diff_t1 = self.forward_model(trajectory_t, action)
 
         # Weight prediction error by signal magnitude
         # Neurons fire for change, not for nothing!
@@ -276,8 +293,9 @@ class CoupledModel(nn.Module):
         weighted_error = signal_magnitude * (pred_diff_t1 - diff_t1) ** 2
         loss_forward = weighted_error.mean()
 
-        # Inverse loss: infer action from temporal diffs
-        action_logits = self.inverse_model(diff_t, diff_t1)
+        # Inverse loss: infer action from EXTENDED trajectory [t-2, t-1, t, t+1]
+        trajectory_extended = torch.cat([trajectory_t, diff_t1], dim=1)  # (batch, 4, H, W)
+        action_logits = self.inverse_model(trajectory_extended)
 
         # Apply action mask (only valid actions)
         if action_mask is not None:
@@ -293,7 +311,7 @@ class CoupledModel(nn.Module):
         with torch.no_grad():
             inferred_action = masked_logits.argmax(dim=-1)
 
-        pred_diff_consistent = self.forward_model(diff_t, inferred_action)
+        pred_diff_consistent = self.forward_model(trajectory_t, inferred_action)
 
         # Also weight consistency by signal magnitude
         weighted_error_consistency = signal_magnitude * (pred_diff_consistent - diff_t1) ** 2
@@ -380,23 +398,27 @@ class PureOnlineTrainer:
         }
         self.step_count = 0
 
-        print(f"🌊 Initialized - NO BUFFER, NO FLOW PREPROCESSING")
+        print(f"🌊 Initialized - TRAJECTORY-BASED LEARNING")
         print(f"   Signal: Raw temporal differences (what photoreceptors see)")
+        print(f"   Context: 3-point trajectories for velocity & acceleration")
         print(f"   Learning: φ-memory fields provide temporal integration")
 
-    def select_action_active_inference(self, temporal_diff, temperature=1.0, beta=0.05):
+    def select_action_active_inference(self, trajectory, temperature=1.0, beta=0.05):
         """
-        Active inference: predict temporal difference for each action,
+        Active inference: predict temporal difference for each action from trajectory,
         choose action that minimizes free energy.
+
+        Args:
+            trajectory: (3, H, W) - [diff_t-2, diff_t-1, diff_t]
         """
-        temporal_diff_tensor = temporal_diff.unsqueeze(0).to(self.device)
+        trajectory_tensor = trajectory.unsqueeze(0).to(self.device)
 
         free_energies = []
         for action in self.valid_actions:
             action_tensor = torch.tensor([action], dtype=torch.long).to(self.device)
 
             with torch.no_grad():
-                pred_diff = self.model(temporal_diff_tensor, action_tensor)
+                pred_diff = self.model(trajectory_tensor, action_tensor)
 
                 # Uncertainty
                 uncertainty = pred_diff.var().item()
@@ -420,17 +442,18 @@ class PureOnlineTrainer:
     def train(self, n_steps=1000, policy_temperature=1.0, beta=0.05,
               show_gameplay=True, log_every=50):
         """
-        Pure online training loop.
+        Pure online training loop with TRAJECTORY context.
 
-        Act → Learn IMMEDIATELY → Act → Learn → ...
+        Bootstrap 3 frames → build trajectory → Act → Learn IMMEDIATELY → ...
+
+        Trajectory = [diff_t-2, diff_t-1, diff_t] gives velocity and acceleration!
         """
         print("\n" + "="*70)
-        print("🌀 STARTING PURE ONLINE LEARNING")
+        print("🌀 STARTING PURE ONLINE LEARNING WITH TRAJECTORY")
         print("="*70)
 
         # Initialize
         frame_raw, info = self.env.reset()
-        frame_prev = preprocess_frame(frame_raw, target_size=self.img_size)
 
         # Live visualization
         if show_gameplay:
@@ -439,112 +462,127 @@ class PureOnlineTrainer:
             fig, axes = plt.subplots(2, 4, figsize=(20, 10))
             plt.ion()
 
-        # Bootstrap: get first temporal difference
-        action = random.choice(self.valid_actions)
-        frame_raw, _, terminated, truncated, _ = self.env.step(action)
-        frame_curr = preprocess_frame(frame_raw, target_size=self.img_size)
-        temporal_diff_prev = compute_temporal_difference(frame_prev, frame_curr, step_count=0)
+        # Bootstrap: collect 4 frames to build initial trajectory of 3 diffs
+        # Frame sequence: f0 → f1 → f2 → f3
+        # Diff sequence: (f0→f1), (f1→f2), (f2→f3)
+        print(f"🌊 Bootstrapping trajectory...")
+        frames = [preprocess_frame(frame_raw, target_size=self.img_size)]
 
-        print(f"🌊 Starting...\n")
+        for i in range(3):
+            action = random.choice(self.valid_actions)
+            frame_raw, _, terminated, truncated, _ = self.env.step(action)
+            if terminated or truncated:
+                frame_raw, _ = self.env.reset()
+            frames.append(preprocess_frame(frame_raw, target_size=self.img_size))
+
+        # Build initial trajectory buffer: 3 temporal diffs
+        trajectory_buffer = []
+        for i in range(3):
+            diff = compute_temporal_difference(frames[i], frames[i+1], step_count=i)
+            trajectory_buffer.append(diff)
+
+        print(f"🌊 Trajectory ready! Starting training...\n")
 
         step = 0
         episodes_done = 0
+        frame_curr = frames[-1]  # Most recent frame
 
         while step < n_steps:
-            # ===== SELECT ACTION =====
-            if step > 0:
-                action = self.select_action_active_inference(
-                    temporal_diff_prev,
-                    temperature=policy_temperature,
-                    beta=beta
-                )
-            else:
-                action = random.choice(self.valid_actions)
+            # ===== BUILD TRAJECTORY TENSOR =====
+            # Stack 3 most recent diffs: [diff_t-2, diff_t-1, diff_t]
+            trajectory_t = torch.stack(trajectory_buffer, dim=0)  # (3, H, W)
+
+            # ===== SELECT ACTION FROM TRAJECTORY =====
+            action = self.select_action_active_inference(
+                trajectory_t,
+                temperature=policy_temperature,
+                beta=beta
+            )
 
             # ===== EXECUTE =====
             frame_raw, _, terminated, truncated, _ = self.env.step(action)
             frame_next = preprocess_frame(frame_raw, target_size=self.img_size)
-            temporal_diff_curr = compute_temporal_difference(frame_curr, frame_next, step_count=step)
+            diff_t1 = compute_temporal_difference(frame_curr, frame_next, step_count=step)
 
             # ===== VISUALIZE =====
             if show_gameplay and step % 2 == 0:
-                # Row 1: Game, Input, Ground Truth, Forward Prediction
+                # Row 1: Game, Input Trajectory (latest), Ground Truth, Forward Prediction
                 axes[0, 0].clear()
                 axes[0, 0].imshow(frame_raw)
                 axes[0, 0].set_title(f'Step {step} | Action: {ACTION_NAMES.get(action, action)}')
                 axes[0, 0].axis('off')
 
                 axes[0, 1].clear()
-                input_viz = temporal_diff_prev.squeeze().numpy()
+                # Show most recent diff from trajectory
+                input_viz = trajectory_buffer[-1].squeeze().numpy()
                 axes[0, 1].imshow(input_viz, cmap='RdBu', vmin=-1, vmax=1)
-                axes[0, 1].set_title('Input: Temporal Diff t→t+1')
+                axes[0, 1].set_title('Input: Latest Diff in Trajectory')
                 axes[0, 1].axis('off')
 
                 axes[0, 2].clear()
-                truth_viz = temporal_diff_curr.squeeze().numpy()
+                truth_viz = diff_t1.squeeze().numpy()
                 axes[0, 2].imshow(truth_viz, cmap='RdBu', vmin=-1, vmax=1)
-                axes[0, 2].set_title('Ground Truth: Diff t+1→t+2')
+                axes[0, 2].set_title('Ground Truth: Next Diff')
                 axes[0, 2].axis('off')
 
-                # Row 2: Forward Prediction, Inverse Prediction, Errors, Loss
-                if step > 0:
-                    # Get predictions
-                    with torch.no_grad():
-                        diff_t = temporal_diff_prev.unsqueeze(0).to(self.device)
-                        diff_t1 = temporal_diff_curr.unsqueeze(0).to(self.device)
-                        actions_tensor = torch.tensor([action], dtype=torch.long).to(self.device)
+                # Get predictions
+                with torch.no_grad():
+                    trajectory_batch = trajectory_t.unsqueeze(0).to(self.device)  # (1, 3, H, W)
+                    diff_t1_batch = diff_t1.unsqueeze(0).to(self.device)  # (1, 1, H, W)
+                    actions_tensor = torch.tensor([action], dtype=torch.long).to(self.device)
 
-                        # Forward prediction
-                        pred_diff = self.model.forward_model(diff_t, actions_tensor)
-                        pred_viz = pred_diff.squeeze().cpu().numpy()
+                    # Forward prediction from trajectory
+                    pred_diff = self.model.forward_model(trajectory_batch, actions_tensor)
+                    pred_viz = pred_diff.squeeze().cpu().numpy()
 
-                        # Inverse prediction
-                        action_logits = self.model.inverse_model(diff_t, diff_t1)
-                        if self.action_mask is not None:
-                            masked_logits = action_logits.clone()
-                            mask_expanded = self.action_mask.unsqueeze(0).expand(action_logits.size(0), -1)
-                            masked_logits[mask_expanded == 0] = -1e9
-                        else:
-                            masked_logits = action_logits
-                        inferred_action = masked_logits.argmax(dim=-1).item()
-                        action_probs = torch.softmax(masked_logits, dim=-1).squeeze().cpu().numpy()
+                    # Inverse prediction from extended trajectory [t-2, t-1, t, t+1]
+                    trajectory_extended = torch.cat([trajectory_batch, diff_t1_batch], dim=1)  # (1, 4, H, W)
+                    action_logits = self.model.inverse_model(trajectory_extended)
+                    if self.action_mask is not None:
+                        masked_logits = action_logits.clone()
+                        mask_expanded = self.action_mask.unsqueeze(0).expand(action_logits.size(0), -1)
+                        masked_logits[mask_expanded == 0] = -1e9
+                    else:
+                        masked_logits = action_logits
+                    inferred_action = masked_logits.argmax(dim=-1).item()
+                    action_probs = torch.softmax(masked_logits, dim=-1).squeeze().cpu().numpy()
 
-                    # Forward prediction
-                    axes[0, 3].clear()
-                    axes[0, 3].imshow(pred_viz, cmap='RdBu', vmin=-1, vmax=1)
-                    axes[0, 3].set_title('Forward Prediction: Diff t+1→t+2')
-                    axes[0, 3].axis('off')
+                # Forward prediction
+                axes[0, 3].clear()
+                axes[0, 3].imshow(pred_viz, cmap='RdBu', vmin=-1, vmax=1)
+                axes[0, 3].set_title('Forward Prediction: Next Diff')
+                axes[0, 3].axis('off')
 
-                    # Forward error
-                    error_viz = np.abs(truth_viz - pred_viz)
-                    axes[1, 0].clear()
-                    axes[1, 0].imshow(error_viz, cmap='hot', vmin=0, vmax=0.5)
-                    axes[1, 0].set_title(f'Forward Error (MAE: {error_viz.mean():.4f})')
-                    axes[1, 0].axis('off')
+                # Forward error
+                error_viz = np.abs(truth_viz - pred_viz)
+                axes[1, 0].clear()
+                axes[1, 0].imshow(error_viz, cmap='hot', vmin=0, vmax=0.5)
+                axes[1, 0].set_title(f'Forward Error (MAE: {error_viz.mean():.4f})')
+                axes[1, 0].axis('off')
 
-                    # Inverse prediction (action probabilities)
-                    axes[1, 1].clear()
-                    valid_action_names = [ACTION_NAMES.get(a, str(a)) for a in self.valid_actions]
-                    valid_probs = action_probs[self.valid_actions]
-                    axes[1, 1].bar(range(len(self.valid_actions)), valid_probs)
-                    axes[1, 1].set_xticks(range(len(self.valid_actions)))
-                    axes[1, 1].set_xticklabels(valid_action_names, rotation=45)
-                    axes[1, 1].set_ylim([0, 1])
-                    axes[1, 1].set_title(f'Inverse: {ACTION_NAMES.get(inferred_action, inferred_action)}' +
-                                        (f' ✓' if inferred_action == action else f' ✗'))
-                    axes[1, 1].grid(alpha=0.3)
+                # Inverse prediction (action probabilities)
+                axes[1, 1].clear()
+                valid_action_names = [ACTION_NAMES.get(a, str(a)) for a in self.valid_actions]
+                valid_probs = action_probs[self.valid_actions]
+                axes[1, 1].bar(range(len(self.valid_actions)), valid_probs)
+                axes[1, 1].set_xticks(range(len(self.valid_actions)))
+                axes[1, 1].set_xticklabels(valid_action_names, rotation=45)
+                axes[1, 1].set_ylim([0, 1])
+                axes[1, 1].set_title(f'Inverse: {ACTION_NAMES.get(inferred_action, inferred_action)}' +
+                                    (f' ✓' if inferred_action == action else f' ✗'))
+                axes[1, 1].grid(alpha=0.3)
 
-                    # Loss curves
-                    if len(self.history['forward']) > 10:
-                        axes[1, 2].clear()
-                        recent_fwd = self.history['forward'][-100:]
-                        recent_inv = self.history['inverse'][-100:]
-                        axes[1, 2].plot(recent_fwd, label='Forward', color='blue', linewidth=2)
-                        axes[1, 2].plot(recent_inv, label='Inverse', color='orange', linewidth=2)
-                        axes[1, 2].set_title(f'Fwd: {recent_fwd[-1]:.5f} | Inv: {recent_inv[-1]:.5f}')
-                        axes[1, 2].set_xlabel('Recent Steps')
-                        axes[1, 2].legend()
-                        axes[1, 2].grid(alpha=0.3)
+                # Loss curves
+                if len(self.history['forward']) > 10:
+                    axes[1, 2].clear()
+                    recent_fwd = self.history['forward'][-100:]
+                    recent_inv = self.history['inverse'][-100:]
+                    axes[1, 2].plot(recent_fwd, label='Forward', color='blue', linewidth=2)
+                    axes[1, 2].plot(recent_inv, label='Inverse', color='orange', linewidth=2)
+                    axes[1, 2].set_title(f'Fwd: {recent_fwd[-1]:.5f} | Inv: {recent_inv[-1]:.5f}')
+                    axes[1, 2].set_xlabel('Recent Steps')
+                    axes[1, 2].legend()
+                    axes[1, 2].grid(alpha=0.3)
 
                     # Accuracy curve
                     if len(self.history['accuracy']) > 10:
@@ -563,13 +601,14 @@ class PureOnlineTrainer:
                 display.clear_output(wait=True)
                 display.display(fig)
 
-            # ===== LEARN IMMEDIATELY =====
-            diff_t = temporal_diff_prev.unsqueeze(0).to(self.device)
-            actions = torch.tensor([action], dtype=torch.long).to(self.device)
-            diff_t1 = temporal_diff_curr.unsqueeze(0).to(self.device)
+            # ===== LEARN IMMEDIATELY FROM TRAJECTORY =====
+            trajectory_batch = trajectory_t.unsqueeze(0).to(self.device)  # (1, 3, H, W)
+            actions_tensor = torch.tensor([action], dtype=torch.long).to(self.device)
+            diff_t1_batch = diff_t1.unsqueeze(0).to(self.device)  # (1, 1, H, W)
 
             # Compute coupled losses (forward + inverse + consistency)
-            losses = self.model.compute_losses(diff_t, diff_t1, actions, action_mask=self.action_mask)
+            losses = self.model.compute_losses(trajectory_batch, diff_t1_batch, actions_tensor,
+                                              action_mask=self.action_mask)
 
             # Update
             self.optimizer.zero_grad()
@@ -595,25 +634,34 @@ class PureOnlineTrainer:
                       f"Inv: {losses['inverse'].item():.4f} | "
                       f"Acc: {losses['accuracy']*100:.1f}% | Eps: {episodes_done}")
 
-            # ===== CONTINUE =====
-            temporal_diff_prev = temporal_diff_curr
-            frame_prev = frame_curr
+            # ===== SLIDE TRAJECTORY WINDOW =====
+            # Remove oldest diff, add new diff
+            trajectory_buffer.pop(0)  # Remove diff_t-2
+            trajectory_buffer.append(diff_t1)  # Add diff_t+1
+            # Now buffer = [diff_t-1, diff_t, diff_t+1] → ready for next step
+
             frame_curr = frame_next
 
             step += 1
             self.step_count += 1
 
-            # Reset if episode ended
+            # Reset if episode ended - rebuild trajectory
             if terminated or truncated:
                 frame_raw, _ = self.env.reset()
-                frame_prev = preprocess_frame(frame_raw, target_size=self.img_size)
 
-                # Bootstrap
-                action = random.choice(self.valid_actions)
-                frame_raw, _, _, _, _ = self.env.step(action)
-                frame_curr = preprocess_frame(frame_raw, target_size=self.img_size)
-                temporal_diff_prev = compute_temporal_difference(frame_prev, frame_curr, step_count=step)
+                # Rebuild trajectory buffer with 4 frames → 3 diffs
+                frames = [preprocess_frame(frame_raw, target_size=self.img_size)]
+                for i in range(3):
+                    action_boot = random.choice(self.valid_actions)
+                    frame_raw, _, _, _, _ = self.env.step(action_boot)
+                    frames.append(preprocess_frame(frame_raw, target_size=self.img_size))
 
+                trajectory_buffer = []
+                for i in range(3):
+                    diff = compute_temporal_difference(frames[i], frames[i+1], step_count=step+i)
+                    trajectory_buffer.append(diff)
+
+                frame_curr = frames[-1]
                 episodes_done += 1
 
         if show_gameplay:
