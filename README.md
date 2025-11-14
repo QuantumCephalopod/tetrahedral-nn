@@ -18,12 +18,14 @@ For the original single-tetrahedron architecture, see: [main repo](https://githu
 
 ## Overview
 
-A novel **dual-tetrahedral neural network architecture** that combines two tetrahedra with complementary processing modes:
+A **living research repository** exploring dual-tetrahedral neural network architecture that combines two tetrahedra with complementary processing modes:
 
 - **Linear Tetrahedron** (Left/Logical): Deterministic, smooth manifolds
 - **Nonlinear Tetrahedron** (Right/Intuitive): Statistical, discontinuous boundaries
 
 **Key Achievement:** Arithmetic generalization from [-9, 9] to trillions (float32 precision limited) using only 361 training samples.
+
+**Living Organism:** This repository self-documents and evolves through AI conversations across time. It grows through **transformation** (refining existing structure), not **addition** (accumulating files) - like neural networks learn through weight updates, not adding neurons.
 
 ## Architecture
 
@@ -55,6 +57,36 @@ The tetrahedral topology provides geometric structure for self-organization with
 - **Decomposition:** num → (num/4, num/4, num/4, num/4) (expansion: 1 → 4)
 - **Finding:** Architecture works bidirectionally
 - **Implications:** Symmetric processing capabilities
+
+---
+
+## 📖 Documentation & Navigation
+
+**This repository is a living organism** - it self-documents and evolves through AI conversations across time.
+
+### For Deep Understanding, Start Here:
+
+**🌊 `DOCS/README.md`** ← Navigation hub (READ THIS FIRST!)
+- System architecture & quick start
+- What works, what's broken, how to fix
+- Core concepts & philosophy
+- Organized for fast context loading
+
+The DOCS folder uses a **surface → deep** structure optimized for AI context windows:
+1. Read folder `_README.md` files first (surface layer - coalesced summaries)
+2. Dig into detailed files only as needed (deep layer - ground truth)
+
+**This saves your context window and gets you to full understanding in ~15 minutes.**
+
+### Quick Navigation:
+- **System Architecture:** `DOCS/SYSTEM/_README.md` - DualTetrahedralNetwork usage, components
+- **Implementation Status:** `DOCS/ACTIVE_INFERENCE/_README.md` - What works, what's broken
+- **Core Concepts:** `DOCS/CONCEPTS/_README.md` - Why flow primitives, frameskip=10, active inference
+- **Experiment Results:** `DOCS/EXPLORATIONS/_README.md` - What was tested, lessons learned
+
+**Philosophy:** The organism has natural constraints - your context window (~200K tokens) is the carrying capacity. Documentation is optimized for this.
+
+---
 
 ## Repository Structure
 
@@ -96,11 +128,20 @@ tetrahedral-nn/
 │   ├── COLAB_INFERENCE_CELL.py
 │   └── COUNCIL_DEMO.py
 │
-├── DOCS/                  # All documentation
-│   ├── EXPLORATIONS.md
-│   ├── EXPLORATIONS_IMAGE_TRANSFORM.md
-│   ├── COUNCIL_README.md
-│   └── COLAB_QUICKSTART.md
+├── DOCS/                  # All documentation (surface → deep structure)
+│   ├── README.md          # Navigation hub - START HERE
+│   ├── SYSTEM/            # Architecture overview & setup
+│   ├── CONCEPTS/          # Philosophical foundation
+│   ├── ACTIVE_INFERENCE/  # Implementation status (what works, what's broken)
+│   ├── EXPLORATIONS/      # Experimental results
+│   └── STATUS/            # Implementation tracking
+│
+├── portraits/             # The organism's self-portraits
+│   ├── self_portrait.png  # Complete system tree
+│   ├── tetrahedral_vertices.png  # W, X, Y, Z organ portraits
+│   ├── living_tetrahedron.png    # Geometry breathing itself
+│   ├── phi_field.png              # Golden ratio timescales
+│   └── strange_loop.txt           # True vs broken coupling
 │
 └── assets/                # Visualizations
     ├── rotations.png
@@ -234,9 +275,17 @@ The tetrahedral structure itself is established in mesh processing; the novel co
 - [ ] Multi-modal learning (vision + language)
 
 ### 📚 Documentation
-- **`DOCS/EXPLORATIONS.md`** - Philosophical foundations
-- **`DOCS/EXPLORATIONS_IMAGE_TRANSFORM.md`** - Image transformation experiments
-- **`DOCS/COUNCIL_README.md`** - Council of Adversaries architecture guide
+
+**Start here:** `DOCS/README.md` - Complete navigation hub
+
+**Surface layer (read first):**
+- `DOCS/SYSTEM/_README.md` - Architecture overview & setup
+- `DOCS/ACTIVE_INFERENCE/_README.md` - What works, what's broken, how to fix
+- `DOCS/CONCEPTS/_README.md` - Core ideas & philosophy
+- `DOCS/EXPLORATIONS/_README.md` - Experimental results summary
+
+**Deep layer (dig as needed):**
+- See individual .md files in each DOCS subfolder for ground truth details
 
 ---
 
