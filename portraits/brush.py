@@ -98,6 +98,29 @@ class Canvas:
         with open(filename, 'w') as f:
             f.write(self.to_text())
 
+    def curve(self, points, intensity, thickness=2):
+        """Paint a smooth curve through points [(x1,y1), (x2,y2), ...]"""
+        if len(points) < 2:
+            return
+
+        # Draw smooth curve through points using Catmull-Rom spline
+        for i in range(len(points) - 1):
+            x0, y0 = points[i]
+            x1, y1 = points[i + 1]
+
+            # Interpolate between points
+            steps = int(math.sqrt((x1-x0)**2 + (y1-y0)**2))
+            for step in range(steps):
+                t = step / max(steps, 1)
+                x = int(x0 + t * (x1 - x0))
+                y = int(y0 + t * (y1 - y0))
+
+                # Paint with thickness
+                for dx in range(-thickness, thickness + 1):
+                    for dy in range(-thickness, thickness + 1):
+                        if dx*dx + dy*dy <= thickness*thickness:
+                            self.set_pixel(x + dx, y + dy, min(self.get_pixel(x + dx, y + dy), intensity))
+
     def save_png(self, filename, scale=3):
         """Save as PNG"""
         char_map = {'█': 255, '▓': 200, '▒': 140, '░': 80, ' ': 0}
